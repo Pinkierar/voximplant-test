@@ -8,12 +8,12 @@
     "strict": true,
     "skipLibCheck": true,
     "removeComments": true,
+    "noImplicitOverride": true,
     "outDir": "dist",
     "rootDir": "src",
     "paths": {
       "#entities/*": ["./src/entities/*"],
-      "#includes/*": ["./src/includes/*"],
-      "#errors/*": ["./src/errors/*"]
+      "#includes/*": ["./src/includes/*"]
     }
   },
   "include": ["src"],
