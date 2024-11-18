@@ -12,10 +12,8 @@
     "rootDir": "src",
     "paths": {
       "#entities/*": ["./src/entities/*"],
-      "#db": ["./src/db"],
       "#includes/*": ["./src/includes/*"],
-      "#variables/*": ["./src/variables/*"],
-      "#training/*": ["./src/training/*"]
+      "#errors/*": ["./src/errors/*"]
     }
   },
   "include": ["src"],

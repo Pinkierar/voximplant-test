@@ -9,18 +9,31 @@
     "start-production": "cross-env NODE_ENV=production node dist/index.js",
     "start-testing": "cross-env NODE_ENV=testing node dist/index.js",
     "build-and-start-production": "npm run build && npm run start-production",
-    "build-and-start-testing": "npm run build && npm run start-testing"
+    "build-and-start-testing": "npm run build && npm run start-testing",
+    "lint": "npx eslint ./src",
+    "lint:fix": "npx eslint ./src --fix"
   },
   "author": "Pinkierar",
   "license": "MIT",
   "devDependencies": {
+    "@eslint/js": "^9.15.0",
+    "@types/eslint__js": "^8.42.3",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^20.14.11",
     "cross-env": "^7.0.3",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.2.1",
+    "prettier": "^3.3.3",
     "tsc-alias": "^1.8.10",
     "tsx": "^4.16.2",
-    "typescript": "^5.4.5"
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.14.0"
   },
   "dependencies": {
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "jsonwebtoken": "^9.0.2"
   }
 }
