@@ -1,0 +1,26 @@
+{
+  "name": "voximplant-test",
+  "version": "0.0.1",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "dev-nowatch": "tsx src/index.ts",
+    "build": "tsc && tsc-alias",
+    "start-production": "cross-env NODE_ENV=production node dist/index.js",
+    "start-testing": "cross-env NODE_ENV=testing node dist/index.js",
+    "build-and-start-production": "npm run build && npm run start-production",
+    "build-and-start-testing": "npm run build && npm run start-testing"
+  },
+  "author": "Pinkierar",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.14.11",
+    "cross-env": "^7.0.3",
+    "tsc-alias": "^1.8.10",
+    "tsx": "^4.16.2",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
