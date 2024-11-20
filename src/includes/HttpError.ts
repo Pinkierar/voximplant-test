@@ -1,5 +1,5 @@
 import { ErrorInfo } from '#includes/ErrorInfo';
-import { HttpStatus, httpStatuses } from '#includes/Http';
+import { HttpStatus, httpStatuses } from '#includes/HttpStatus';
 
 export class HttpError extends ErrorInfo {
   public readonly status: HttpStatus;
@@ -17,6 +17,13 @@ export class HttpError extends ErrorInfo {
     return new HttpError(sender, status, message, info, stack);
   }
 
+  public override toJSON(): Record<string, any> {
+    return {
+      status: this.status,
+      ...super.toJSON(),
+    };
+  }
+
   private static getStatus(error: unknown): HttpStatus | null {
     if (error == null) return null;
     if (typeof error !== 'object') return null;
@@ -28,12 +35,5 @@ export class HttpError extends ErrorInfo {
     if (!httpStatuses.includes(status)) return null;
 
     return status;
-  }
-
-  public override toJSON(): Record<string, any> {
-    return {
-      status: this.status,
-      ...super.toJSON(),
-    };
   }
 }

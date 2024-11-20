@@ -1,7 +1,9 @@
+import './config';
+import { VoximplantApiClient, VoximplantApplicationService, VoximplantService } from '#entities/Voximplant';
 import express, { type ErrorRequestHandler } from 'express';
-import { HttpError, HttpStatus } from '#includes/Http';
-import { JwtService } from '#entities/Jwt';
-import { ACCOUNT_ID, KEY_ID, PRIVATE_KEY } from './config';
+import { HttpStatus } from '#includes/HttpStatus';
+import { HttpError } from '#includes/HttpError';
+import { VOXIMPLANT_CREDENTIALS } from './config';
 
 const port = 3000;
 
@@ -18,7 +20,7 @@ app.get('/api/execute', async (_req, res, next) => {
 });
 
 app.all('*', async (req, _res, next) => {
-  next(new HttpError('route *', HttpStatus.NotFound, 'Entry point not found', { originalUrl: req.originalUrl }));
+  next(new HttpError('app.all *', HttpStatus.NotFound, 'Entrypoint not found', { originalUrl: req.originalUrl }));
 });
 
 app.use(((rawError, _req, res, _next) => {
@@ -31,57 +33,38 @@ app.listen(port, () => {
   console.log(`Listening on ${port}`);
 });
 
-// // app.js on client
-// // Please, change this data before go.
-//
-// const appName = 'VOXAPPLICATION';
-// const account = 'ACCOUNT';
-// const username = `${appUser}@${appName}.${account}.voximplant.com`;
-//
-// const voximplant = Voximplant.getInstance();
-//
 async function main() {
-  // await voximplant.init({
-  //   node: ConnectionNode.NODE_11,
-  // });
-  //
-  // // Connect to the cloud and request a key
-  // voximplant.connect().then(() => voximplant.requestOneTimeLoginKey(username));
-  //
-  // // Listen to the server response
-  // voximplant.addEventListener(Voximplant.Events.AuthResult, (e) => {
-  //   console.log(`AuthResult: ${e.result}`);
-  //   console.log(`Auth code: ${e.code}`);
-  //   if (e.result) {
-  //     // Login is successful
-  //   } else if (e.code == 302) {
-  //     console.log(e.key);
-  //     // IMPORTANT: You should always calculate the token on your backend!
-  //     $.post(
-  //       'https://your.backend.com/',
-  //       {
-  //         key: e.key,
-  //       },
-  //       (token) => {
-  //         voximplant.loginWithOneTimeKey(username, token);
-  //       },
-  //       'text',
-  //     );
-  //   }
-  // });
+  const serverPrefix = 'pr-test-1';
 
-  const token = await JwtService.createJwt(PRIVATE_KEY, 3600, {
-    kid: KEY_ID,
-    iss: ACCOUNT_ID,
+  const applicationName = 'work';
+  const ruleName = 'any';
+  const rulePattern = '.*';
+
+  const client = await VoximplantApiClient.createInstance(VOXIMPLANT_CREDENTIALS);
+  const voximplantService = new VoximplantService(client);
+  const application = await voximplantService.findOrCreateApplicationByName(`${serverPrefix}-${applicationName}`);
+  const voximplantApplicationService = new VoximplantApplicationService(client, application);
+  const rule = await voximplantApplicationService.setRuleByName(`${serverPrefix}-${ruleName}`, rulePattern);
+  console.log({
+    application,
+    rule,
   });
-
-  console.log(token);
+  // await client.Rules.getRules({});
+  // const l = await client.CallLists.createCallList({
+  //   name: 'test-1 ',
+  //   ruleId: 7712374,
+  //   fileContent: Buffer.from('f', 'utf8'),
+  //   numAttempts: 1,
+  //   priority: 1,
+  //   maxSimultaneous: 1,
+  // });
+  // console.log(l);
 }
 
 (async () => {
   try {
     await main();
   } catch (e) {
-    console.log('error', e);
+    console.log('Error in main function:', e);
   }
 })();
