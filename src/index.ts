@@ -44,6 +44,7 @@ async function main() {
   const serverPrefix = 'pr-test-1';
 
   const applicationName = 'work';
+  const workingPhoneNumber = '699118451';
 
   const ruleName = 'any';
   const rulePattern = '.*';
@@ -74,11 +75,7 @@ async function main() {
   });
   console.log({ callList });
 
-  // await this.client.PhoneNumbers.bindPhoneNumberToApplication({
-  //   applicationName,
-  //   applicationId,
-  //
-  // });
+  await voximplantRuleService.bindPhoneNumber(workingPhoneNumber);
 }
 
 (async () => {
