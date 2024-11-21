@@ -1,82 +1,124 @@
 import type { ApplicationInfo, RuleInfo } from '@voximplant/apiclient-nodejs/dist/Structures';
 import { ErrorInfo } from '#includes/ErrorInfo';
 import { pick } from '#includes/pick';
-import type { VoximplantApiClient } from './VoximplantApiClient';
-import type { AddRuleRequest } from '@voximplant/apiclient-nodejs/dist/Interfaces';
+import { VoximplantApiClient } from './VoximplantApiClient';
+import type {
+  AddRuleRequest as VoximplantAddRuleRequest,
+  SetRuleInfoRequest,
+} from '@voximplant/apiclient-nodejs/dist/Interfaces';
+
+type AddRuleRequest = Partial<Pick<VoximplantAddRuleRequest, 'scenarioId' | 'scenarioName'>> &
+  Omit<VoximplantAddRuleRequest, 'applicationId' | 'applicationName' | 'ruleName' | 'scenarioId' | 'scenarioName'>;
+type UpdateRuleRequest = Omit<SetRuleInfoRequest, 'ruleId' | 'ruleName'>;
 
 export class VoximplantApplicationService {
-  private readonly applicationRequest;
-
   public constructor(
     private readonly client: VoximplantApiClient,
     private readonly application: ApplicationInfo,
-  ) {
-    this.applicationRequest = pick(this.application, ['applicationId', 'applicationName']);
-  }
+  ) {}
 
-  public async findRuleByName(ruleName: string): Promise<RuleInfo | null> {
-    const rules = await this.client.Rules.getRules({
-      ...this.applicationRequest,
-      ruleName,
-    });
-
-    const rule = rules.result.find((rule) => rule.ruleName === ruleName);
-
-    return rule || null;
-  }
-
-  public async setRuleByName(ruleName: string, rulePattern: string): Promise<RuleInfo> {
-    const existRule = await this.findRuleByName(ruleName);
-    if (!existRule) {
-      return this.createRule(ruleName, rulePattern);
-    }
-
-    return await this.setRulePattern(existRule, rulePattern);
-  }
-
-  private async findRuleById(ruleId: number): Promise<RuleInfo | null> {
+  /**
+   * Gets the rule by id.
+   */
+  public async getRuleById(ruleId: number): Promise<RuleInfo | null> {
     const {
       result: [rule],
     } = await this.client.Rules.getRules({
-      ...this.applicationRequest,
+      applicationId: this.application.applicationId,
+      applicationName: this.application.applicationName,
       ruleId,
-    });
+      count: 1,
+    }).then(VoximplantApiClient.errorHandler);
 
     return rule || null;
   }
 
-  private async setRulePattern(rule: RuleInfo, rulePattern: string): Promise<RuleInfo> {
-    if (rule.rulePattern === rulePattern) return rule;
+  /**
+   * Gets the rule by name.
+   */
+  public async getRuleByName(ruleName: string): Promise<RuleInfo | null> {
+    const { result: rules } = await this.client.Rules.getRules({
+      applicationId: this.application.applicationId,
+      applicationName: this.application.applicationName,
+      ruleName,
+    }).then(VoximplantApiClient.errorHandler);
 
-    const { result: ruleId } = await this.client.Rules.setRuleInfo({
-      ruleId: rule.ruleId,
-      rulePattern,
-    });
+    const rule = rules.find((rule) => rule.ruleName === ruleName);
 
-    const updatedRule = await this.findRuleById(ruleId);
+    return rule || null;
+  }
+
+  /**
+   * Gets and edits a rule if existed by name.
+   */
+  public async getAndUpdateRuleByName(ruleName: string, request: UpdateRuleRequest): Promise<RuleInfo | null> {
+    const rule = await this.getRuleByName(ruleName);
+    if (!rule) return null;
+
+    return await this.updateRule(rule, request);
+  }
+
+  /**
+   * Edits or adds a new rule for the current application by name.
+   */
+  public async getAndUpdateOrAddRuleByName(ruleName: string, request: AddRuleRequest): Promise<RuleInfo> {
+    const existRule = await this.getAndUpdateRuleByName(
+      ruleName,
+      pick(request, ['rulePattern', 'rulePatternExclude', 'bindKeyId', 'videoConference']),
+    );
+
+    if (existRule) return existRule;
+
+    return this.addRule(ruleName, request);
+  }
+
+  private async updateRule(rule: RuleInfo, request: UpdateRuleRequest): Promise<RuleInfo> {
+    if (!VoximplantApplicationService.isDifferentRoleData(rule, request)) return rule;
+
+    const ruleId = rule.ruleId;
+
+    await this.client.Rules.setRuleInfo({
+      ruleId,
+      ...request,
+    }).then(VoximplantApiClient.errorHandler);
+
+    const updatedRule = await this.getRuleById(ruleId);
     if (!updatedRule) {
-      throw new ErrorInfo('VoximplantApplicationService.setRulePattern', 'Updated role not found', { rule, ruleId });
+      throw new ErrorInfo('VoximplantApplicationService.updateRule', 'Updated role not found', { rule, ruleId });
     }
 
     return updatedRule;
   }
 
-  private async createRule(ruleName: string, rulePattern: string): Promise<RuleInfo> {
+  private async addRule(ruleName: string, request: AddRuleRequest): Promise<RuleInfo> {
     // @ts-ignore scenario not required
-    const scenarioRequest: Pick<AddRuleRequest, 'scenarioId' | 'scenarioName'> = {};
+    const scenarioRequest: Pick<VoximplantAddRuleRequest, 'scenarioId' | 'scenarioName'> = null;
 
-    const { ruleId } = await this.client.Rules.addRule({
-      ...this.applicationRequest,
+    const { ruleId: createdRuleId } = await this.client.Rules.addRule({
       ...scenarioRequest,
+      applicationId: this.application.applicationId,
+      applicationName: this.application.applicationName,
       ruleName,
-      rulePattern,
-    });
+      ...request,
+    }).then(VoximplantApiClient.errorHandler);
 
-    const createdRule = await this.findRuleById(ruleId);
+    const createdRule = await this.getRuleById(createdRuleId);
     if (!createdRule) {
-      throw new ErrorInfo('VoximplantApplicationService.createRule', 'Created role not found', { ruleName, ruleId });
+      throw new ErrorInfo('VoximplantApplicationService.addRule', 'Created role not found', {
+        ruleName,
+        createdRuleId,
+      });
     }
 
     return createdRule;
+  }
+
+  private static isDifferentRoleData(rule: RuleInfo, request: UpdateRuleRequest): boolean {
+    if (request.rulePattern !== rule.rulePattern) return true;
+    if (request.rulePatternExclude !== rule.rulePatternExclude) return true;
+    if (request.bindKeyId !== undefined) return true;
+    if (request.videoConference !== rule.videoConference) return true;
+
+    return false;
   }
 }
