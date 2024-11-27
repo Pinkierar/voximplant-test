@@ -1,0 +1,33 @@
+{
+  "name": "voximplant-test",
+  "version": "0.0.1",
+  "main": "src/index.ts",
+  "author": "Pinkierar",
+  "license": "MIT",
+  "scripts": {
+    "dev:nowatch": "tsx src/index.ts",
+    "lint": "npx eslint ./src",
+    "lint:fix": "npx eslint ./src --fix",
+    "voxengine-ci-init": "cross-env VOX_CI_ROOT_PATH=source_files npx voxengine-ci init",
+    "voxengine-ci-init:force": "cross-env VOX_CI_ROOT_PATH=source_files npx voxengine-ci init --force",
+    "voxengine-ci-upload": "cross-env VOX_CI_ROOT_PATH=source_files npx voxengine-ci upload"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.15.0",
+    "@types/eslint__js": "^8.42.3",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^20.14.11",
+    "@voximplant/voxengine-ci": "^1.1.0",
+    "cross-env": "^7.0.3",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.2.1",
+    "eslint-plugin-unused-imports": "^4.1.4",
+    "prettier": "^3.3.3",
+    "tsc-alias": "^1.8.10",
+    "tsx": "^4.16.2",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.14.0"
+  }
+}

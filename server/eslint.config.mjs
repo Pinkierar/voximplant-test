@@ -17,9 +17,11 @@ export default tseslint.config(
       '@typescript-eslint/no-empty-object-type': 'off',
       '@typescript-eslint/ban-ts-comment': 'off',
       '@typescript-eslint/no-explicit-any': 'off',
-      '@typescript-eslint/no-unused-vars': 'off',
-      curly: ['error', 'multi-line'],
+      '@typescript-eslint/no-unused-vars': 'warn',
+      curly: ['warn', 'multi-line'],
       'unused-imports/no-unused-imports': 'warn',
+      '@typescript-eslint/explicit-member-accessibility': 'warn',
+      'prettier/prettier': 'warn',
     },
   },
 );

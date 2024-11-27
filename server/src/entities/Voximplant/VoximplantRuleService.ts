@@ -2,7 +2,6 @@ import type { CallList, RuleInfo } from '@voximplant/apiclient-nodejs/dist/Struc
 import { ErrorInfo } from '#includes/ErrorInfo';
 import { VoximplantApiClient } from './VoximplantApiClient';
 import {
-  CallListsInterface,
   type BindPhoneNumberToApplicationRequest,
   type CreateCallListRequest as VoximplantCreateCallListRequest,
 } from '@voximplant/apiclient-nodejs/dist/Interfaces';

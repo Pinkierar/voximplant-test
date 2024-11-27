@@ -1,4 +1,4 @@
-import type { ApplicationInfo, AttachedPhoneInfo, RuleInfo } from '@voximplant/apiclient-nodejs/dist/Structures';
+import type { ApplicationInfo } from '@voximplant/apiclient-nodejs/dist/Structures';
 import { ErrorInfo } from '#includes/ErrorInfo';
 import { VoximplantApiClient } from './VoximplantApiClient';
 

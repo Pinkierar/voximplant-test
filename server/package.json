@@ -2,19 +2,15 @@
   "name": "voximplant-test",
   "version": "0.0.1",
   "main": "src/index.ts",
+  "author": "Pinkierar",
+  "license": "MIT",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "dev-nowatch": "tsx src/index.ts",
+    "dev:nowatch": "tsx src/index.ts",
     "build": "tsc && tsc-alias",
-    "start-production": "cross-env NODE_ENV=production node dist/index.js",
-    "start-testing": "cross-env NODE_ENV=testing node dist/index.js",
-    "build-and-start-production": "npm run build && npm run start-production",
-    "build-and-start-testing": "npm run build && npm run start-testing",
     "lint": "npx eslint ./src",
     "lint:fix": "npx eslint ./src --fix"
   },
-  "author": "Pinkierar",
-  "license": "MIT",
   "devDependencies": {
     "@eslint/js": "^9.15.0",
     "@types/eslint__js": "^8.42.3",

@@ -7,6 +7,7 @@
     "forceConsistentCasingInFileNames": true,
     "strict": true,
     "skipLibCheck": true,
+    "allowJs": true,
     "removeComments": true,
     "noImplicitOverride": true,
     "outDir": "dist",
@@ -16,6 +17,7 @@
       "#includes/*": ["./src/includes/*"]
     }
   },
-  "include": ["src"],
-  "exclude": ["node_modules"]
+  "include": [
+    "src"
+  ],
 }
