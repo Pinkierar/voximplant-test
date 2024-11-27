@@ -5,12 +5,11 @@
   "author": "Pinkierar",
   "license": "MIT",
   "scripts": {
-    "dev:nowatch": "tsx src/index.ts",
     "lint": "npx eslint ./src",
     "lint:fix": "npx eslint ./src --fix",
     "voxengine-ci-init": "cross-env VOX_CI_ROOT_PATH=source_files npx voxengine-ci init",
     "voxengine-ci-init:force": "cross-env VOX_CI_ROOT_PATH=source_files npx voxengine-ci init --force",
-    "voxengine-ci-upload": "cross-env VOX_CI_ROOT_PATH=source_files npx voxengine-ci upload"
+    "voxengine-ci-upload": "tsx src/deploy.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.15.0",
