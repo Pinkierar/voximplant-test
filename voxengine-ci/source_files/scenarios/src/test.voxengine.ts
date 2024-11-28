@@ -1,3 +1,7 @@
+/// region ==== PREPARATION ================================
+
+// region includes
+
 class ErrorInfo extends Error {
   public sender: string;
   public info: unknown;
@@ -55,96 +59,196 @@ class ErrorInfo extends Error {
   }
 }
 
-interface EventTargetObject<EventsMap extends Record<string, any>, EventName extends keyof EventsMap> {
+function log(...messages: any[]) {
+  const log = messages
+    .map((message) => {
+      if (typeof message === 'object') {
+        try {
+          return JSON.stringify(message, null, 2);
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars,no-empty
+        } catch (e) {}
+      }
+
+      return String(message);
+    })
+    .join(' ');
+
+  Logger.write(`[Лог сценария] ${log}`);
+}
+
+// endregion includes
+
+// region PromiseControl
+
+class ControlledPromise<Result> {
+  public readonly promise: Promise<Result>;
+  private onResolve!: (result: Result) => void;
+  private onReject!: (error: unknown) => void;
+
+  public constructor() {
+    this.promise = new Promise<Result>((resolve, reject) => {
+      this.onResolve = resolve;
+      this.onReject = reject;
+    });
+  }
+
+  private _onBeforeFinally?: () => void;
+
+  public set onBeforeFinally(value: () => void) {
+    this._onBeforeFinally = value;
+  }
+
+  public resolve(result: Result): void {
+    this._onBeforeFinally?.();
+    this.onResolve(result);
+  }
+
+  public reject(error: unknown): void {
+    this._onBeforeFinally?.();
+    this.onReject(error);
+  }
+}
+
+class PromiseControl<Result, Args extends any[] = []> {
+  private controlledPromise: ControlledPromise<Result> | null = null;
+
+  public constructor(
+    private readonly description: string,
+    private readonly handlersFactory: (controlledPromise: ControlledPromise<Result>) => {
+      promiseCreatedHandler: (...args: Args) => void;
+      promiseFinallyHandler: () => void;
+    },
+  ) {}
+
+  public run(...args: Args): Promise<Result> {
+    log(`Промис "${this.description}" создаётся...`, { args });
+
+    if (this.controlledPromise) throw new ErrorInfo('PromiseControl.run', `Промис "${this.description}" уже создан`);
+
+    this.controlledPromise = new ControlledPromise<Result>();
+
+    const { promiseCreatedHandler, promiseFinallyHandler } = this.handlersFactory(this.controlledPromise);
+
+    log(`Промис "${this.description}" создан`);
+    promiseCreatedHandler(...args);
+
+    this.controlledPromise.onBeforeFinally = () => {
+      log(`Промис "${this.description}" завершён`);
+      promiseFinallyHandler();
+
+      this.controlledPromise = null;
+    };
+
+    return this.controlledPromise.promise;
+  }
+
+  public reject(error: unknown): void {
+    if (!this.controlledPromise) return;
+
+    log(`Промис "${this.description}" принудительно отклоняется`);
+
+    this.controlledPromise.reject(error);
+  }
+
+  public resolve(result: Result): void {
+    if (!this.controlledPromise) return;
+
+    log(`Промис "${this.description}" принудительно завершается`);
+
+    this.controlledPromise.resolve(result);
+  }
+}
+
+// endregion PromiseControl
+
+// region Sleeper
+
+class Sleeper {
+  private promiseControl: PromiseControl<void, [number]>;
+
+  public constructor() {
+    this.promiseControl = new PromiseControl<void, [number]>('sleeper', (controlledPromise) => {
+      const eventListener = () => {
+        controlledPromise.resolve();
+      };
+
+      let timeout: NodeJS.Timeout;
+
+      return {
+        promiseCreatedHandler: (delay) => {
+          timeout = setTimeout(eventListener, delay);
+        },
+        promiseFinallyHandler: () => {
+          if (timeout !== undefined) {
+            clearTimeout(timeout);
+          }
+        },
+      };
+    });
+  }
+
+  /**
+   * Wait the specified number of milliseconds
+   */
+  public sleep(delay: number): Promise<void> {
+    return this.promiseControl.run(delay);
+  }
+
+  /**
+   * Stop waiting
+   */
+  public wakeUp(): void {
+    this.promiseControl.resolve();
+  }
+
+  /**
+   * Reject waiting with exception
+   */
+  public scareUp(error: unknown): void {
+    this.promiseControl.reject(error);
+  }
+}
+
+// endregion Sleeper
+
+// region EventAwaiter
+
+interface IEventTarget<EventsMap extends Record<string, any>, EventName extends keyof EventsMap> {
   addEventListener(eventName: EventName, handler: (event: EventsMap[EventName]) => void): void;
 
   removeEventListener(eventName: EventName, handler: (event: EventsMap[EventName]) => void): void;
 }
 
-interface EventSubscription<EventsMap extends Record<string, any>, EventName extends keyof EventsMap> {
-  resolve(event: EventsMap[EventName]): void;
+class EventAwaiter<EventsMap extends Record<string, any>, EventName extends keyof EventsMap> {
+  private promiseControl: PromiseControl<EventsMap[EventName]>;
 
-  reject(error: unknown): void;
-}
+  public constructor(description: string, obj: IEventTarget<EventsMap, EventName>, eventName: EventName) {
+    this.promiseControl = new PromiseControl<EventsMap[EventName]>(description, (controlledPromise) => {
+      const eventListener = controlledPromise.resolve.bind(controlledPromise);
 
-class EventWaiter<EventsMap extends Record<string, any>, EventName extends keyof EventsMap> {
-  public static readonly CancelSignal = Symbol('CancelSignal');
-
-  private readonly obj: EventTargetObject<EventsMap, EventName>;
-  private readonly eventName: EventName;
-
-  private subscription: EventSubscription<EventsMap, EventName> | null = null;
-
-  public constructor(obj: EventTargetObject<EventsMap, EventName>, eventName: EventName) {
-    this.obj = obj;
-    this.eventName = eventName;
+      return {
+        promiseCreatedHandler() {
+          obj.addEventListener(eventName, eventListener);
+        },
+        promiseFinallyHandler() {
+          obj.removeEventListener(eventName, eventListener);
+        },
+      };
+    });
   }
 
-  public wait(
-    resolve: (event: EventsMap[EventName]) => void,
-    reject: (error: unknown) => void,
-    canceling?: () => void,
-  ): void;
-  public wait(): Promise<EventsMap[EventName]>;
-  public wait(
-    resolve?: (event: EventsMap[EventName]) => void,
-    reject?: (error: unknown) => void,
-    canceling?: () => void,
-  ): Promise<EventsMap[EventName]> | void {
-    const promise = new Promise(this.subscribe.bind(this));
-
-    if (resolve && reject) {
-      promise.then(resolve).catch((error) => {
-        if (error === EventWaiter.CancelSignal) {
-          canceling?.();
-        } else {
-          reject(error);
-        }
-      });
-    } else if (!resolve && !reject && !canceling) {
-      return promise;
-    } else {
-      throw new ErrorInfo('EventWaiter.wait', 'Invalid parameters');
-    }
+  public wait(): Promise<EventsMap[EventName]> {
+    return this.promiseControl.run();
   }
 
-  public cancel(): void {
-    if (!this.subscription) return;
-
-    this.subscription.reject(EventWaiter.CancelSignal);
-  }
-
-  private success(resolve: (event: EventsMap[EventName]) => void, event: EventsMap[EventName]): void {
-    this.unsubscribe();
-    resolve(event);
-  }
-
-  private fail(reject: (error: unknown) => void, error: unknown): void {
-    this.unsubscribe();
-    reject(error);
-  }
-
-  private subscribe(resolve: (event: EventsMap[EventName]) => void, reject: (error: unknown) => void): void {
-    if (this.subscription) {
-      this.cancel();
-    }
-
-    this.subscription = {
-      resolve: this.success.bind(this, resolve),
-      reject: this.fail.bind(this, reject),
-    };
-
-    this.obj.addEventListener(this.eventName, this.subscription.resolve);
-  }
-
-  private unsubscribe(): void {
-    if (!this.subscription) return;
-
-    this.obj.removeEventListener(this.eventName, this.subscription.resolve);
-
-    this.subscription = null;
+  public reject(error: unknown): void {
+    return this.promiseControl.reject(error);
   }
 }
+
+// endregion EventAwaiter
+
+// region services
 
 class CallListService {
   private static enabled: boolean = false;
@@ -152,7 +256,7 @@ class CallListService {
   public static enable(): void {
     CallListService.enabled = true;
 
-    Logger.write('CallListService активирован');
+    log('CallListService активирован');
   }
 
   public static reportError(error: unknown): Promise<void> {
@@ -166,108 +270,12 @@ class CallListService {
   }
 }
 
-class CalledUser {
-  public constructor(
-    public readonly name: string,
-    public readonly phone: string,
-  ) {
-    Logger.write(`Создан вызываемый абонент: ${JSON.stringify({ name, phone }, null, 2)}`);
-  }
-
-  public static from(data: unknown): CalledUser {
-    if (!data || typeof data !== 'object') {
-      throw new ErrorInfo('CalledUser.from', 'Данные вызываемого абонента не удалось прочитать', { data });
-    }
-
-    if (!('phone' in data) || typeof data.phone !== 'string' || data.phone === '') {
-      throw new ErrorInfo('CalledUser.from', 'Номер телефона вызываемого абонента не удалось прочитать', { data });
-    }
-
-    if (!('name' in data) || typeof data.name !== 'string' || data.name === '') {
-      throw new ErrorInfo('CalledUser.from', 'Имя вызываемого абонента не удалось прочитать', { data });
-    }
-
-    return new CalledUser(data.name, data.phone);
-  }
-}
-
-class CallController {
-  private readonly call: Call;
-
-  private failedEvent: EventWaiter<_CallEvents, CallEvents.Failed>;
-  private disconnectedEvent: EventWaiter<_CallEvents, CallEvents.Disconnected>;
-  private connectedEvent: EventWaiter<_CallEvents, CallEvents.Connected>;
-  private playbackFinishedEvent: EventWaiter<_CallEvents, CallEvents.PlaybackFinished>;
-
-  public constructor(call: Call) {
-    this.call = call;
-
-    this.failedEvent = new EventWaiter<_CallEvents, CallEvents.Failed>(this.call, CallEvents.Failed);
-    this.disconnectedEvent = new EventWaiter<_CallEvents, CallEvents.Disconnected>(this.call, CallEvents.Disconnected);
-    this.connectedEvent = new EventWaiter<_CallEvents, CallEvents.Connected>(this.call, CallEvents.Connected);
-    this.playbackFinishedEvent = new EventWaiter<_CallEvents, CallEvents.PlaybackFinished>(
-      this.call,
-      CallEvents.PlaybackFinished,
-    );
-  }
-
-  /**
-   * Call the specified number and wait for a successful connection
-   */
-  public static async callPSTN(phone: string, callerId: string = 'default'): Promise<CallController> {
-    const call = VoxEngine.callPSTN(phone, callerId);
-    const callController = new CallController(call);
-
-    return new Promise((resolve, reject) => {
-      call.addEventListener(CallEvents.Failed, (event) => {
-        reject(new ErrorInfo('CallScript.call', 'Не удалось дозвониться (failed)', event));
-      });
-
-      call.addEventListener(CallEvents.Disconnected, (event) => {
-        // reject не отклонит промис, если сработало событие CallEvents.Connected, где промис был решён
-        reject(new ErrorInfo('CallScript.call', 'Не удалось дозвониться (disconnected)', event));
-      });
-
-      call.addEventListener(CallEvents.Connected, () => {
-        resolve(callController);
-      });
-    });
-  }
-
-  /**
-   * Tell the subscriber
-   */
-  public say(text: string): void {
-    this.call.say(text, { language: VoiceList.Amazon.ru_RU_Tatyana });
-  }
-
-  /**
-   * Wait for a response from the subscriber
-   */
-  public async waitAnswer(): Promise<string> {
-    return 'test';
-  }
-
-  /**
-   * End call
-   */
-  public end() {
-    this.call.hangup();
-  }
-}
-
-type CallResult = {
-  client_answer: string; // Последний ответ
-  rating: number | null;
-  status: boolean;
-};
-
 class VoxEngineService {
   public static getCustomData(): unknown {
     const customData = VoxEngine.customData();
 
     if (!customData) {
-      throw new ErrorInfo('VoxEngineService.getCustomData', 'customData не указан');
+      throw new ErrorInfo('VoxEngineService.getCustomData', 'customData не указан', { customData });
     }
 
     let data;
@@ -286,37 +294,246 @@ class VoxEngineService {
       CallListService.enable();
     }
 
-    Logger.write(`Прочитан customData: ${JSON.stringify(data, null, 2)}`);
+    log('Прочитан customData:', data);
 
     return data;
   }
 }
 
-async function main(): Promise<void> {
-  const data = VoxEngineService.getCustomData();
-  const calledUser = CalledUser.from(data);
+// endregion services
 
-  const callController = await CallController.callPSTN(calledUser.phone);
-  callController.say(`Привет, ${calledUser.name}`);
-  callController.end();
+// region CallControl
+
+class CallDisconnectedException extends Error {
+  public constructor(public readonly event: _DisconnectedEvent) {
+    super(event.reason);
+  }
 }
 
-async function handleError(e: unknown): Promise<void> {
+class CallControl {
+  private readonly call: Call;
+  private readonly sleeper = new Sleeper();
+  private timeout?: NodeJS.Timeout;
+  private endObject?: unknown;
+
+  private playbackFinishedAwaiter: EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>;
+
+  private constructor(call: Call) {
+    this.call = call;
+
+    this.startCompletionHandling();
+
+    this.playbackFinishedAwaiter = new EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>(
+      'PlaybackFinished',
+      this.call,
+      CallEvents.PlaybackFinished,
+    );
+
+    log('Создано управление звонком');
+  }
+
+  /**
+   * Call the specified number and wait for a successful connection
+   */
+  public static async callPSTN(phone: string): Promise<CallControl> {
+    log('Вызов по номеру телефона', { phone });
+    const call = VoxEngine.callPSTN(phone, 'default');
+
+    return await CallControl.reach(call);
+  }
+
+  /**
+   * Wait for a successful connection
+   */
+  private static async reach(call: Call): Promise<CallControl> {
+    return new Promise((resolve, reject) => {
+      const errorHandler = (event: unknown) => {
+        reject(new ErrorInfo('CallScript.call', 'Не удалось дозвониться', event));
+      };
+
+      call.addEventListener(CallEvents.Failed, errorHandler);
+      call.addEventListener(CallEvents.Disconnected, errorHandler);
+
+      call.addEventListener(CallEvents.Connected, () => {
+        log('Соединение с вызываемым абонентом установлено');
+
+        call.removeEventListener(CallEvents.Failed, errorHandler);
+        call.removeEventListener(CallEvents.Disconnected, errorHandler);
+
+        const callControl = new CallControl(call);
+
+        resolve(callControl);
+      });
+    });
+  }
+
+  /**
+   * End the call immediately after time has expired
+   */
+  public setCallTimeout(ms: number) {
+    if (this.endObject) throw this.endObject;
+    log(`Установлено ограничение по времени: ${ms}ms`);
+
+    this.timeout = setTimeout(() => {
+      log('Звонок завершается из-за ограничения по времени');
+
+      this.call.hangup();
+    }, ms);
+  }
+
+  /**
+   * Tell the subscriber
+   */
+  public async tell(text: string): Promise<void> {
+    if (this.endObject) throw this.endObject;
+
+    log('Вызываемому абоненту говорится:', { text });
+    this.call.say(text, { language: VoiceList.Google.ru_RU_Standard_D });
+    await this.playbackFinishedAwaiter.wait();
+  }
+
+  /**
+   * Wait the specified number of milliseconds
+   */
+  public async silent(delay: number): Promise<void> {
+    if (this.endObject) throw this.endObject;
+
+    log(`Ничего не происходит ${delay}ms`);
+
+    await this.sleeper.sleep(delay);
+  }
+
+  /**
+   * Wait for a response from the subscriber
+   */
+  public async waitAnswer(): Promise<string> {
+    if (this.endObject) throw this.endObject;
+
+    return 'test';
+  }
+
+  /**
+   * End the call
+   */
+  public async hangup(): Promise<void> {
+    if (this.endObject) throw this.endObject;
+
+    log('Звонок завершается');
+
+    setTimeout(() => {
+      this.call.hangup();
+    });
+
+    await this.sleeper.sleep(60000);
+
+    throw new ErrorInfo('CallControl.hangup', 'Событие Disconnected не вызвалось в течении минуты');
+  }
+
+  private startCompletionHandling() {
+    const errorHandler = (error: unknown) => {
+      this.endObject = error;
+
+      log('Звонок завершён');
+
+      clearTimeout(this.timeout);
+      this.playbackFinishedAwaiter.reject(error);
+      this.sleeper.scareUp(error);
+    };
+
+    this.call.addEventListener(CallEvents.Failed, (event) => {
+      errorHandler(new ErrorInfo('CallScript.call', 'Ошибка звонка', event));
+    });
+
+    this.call.addEventListener(CallEvents.Disconnected, (event) => {
+      errorHandler(new CallDisconnectedException(event));
+    });
+  }
+}
+
+// endregion CallControl
+
+/// endregion ==== PREPARATION ================================
+
+interface CalledUserData {
+  readonly name: string;
+  readonly phone: string;
+}
+
+function createCalledUserData(data: unknown): CalledUserData {
+  if (!data || typeof data !== 'object') {
+    throw new ErrorInfo('CalledUser.from', 'Данные вызываемого абонента не удалось прочитать', { data });
+  }
+
+  if (!('phone' in data) || !data.phone || typeof data.phone !== 'string') {
+    throw new ErrorInfo('CalledUser.from', 'Номер телефона вызываемого абонента не удалось прочитать', { data });
+  }
+  const phone = data.phone;
+
+  if (!('name' in data) || !data.name || typeof data.name !== 'string') {
+    throw new ErrorInfo('CalledUser.from', 'Имя вызываемого абонента не удалось прочитать', { data });
+  }
+  const name = data.name;
+
+  const calledUserData = { name, phone };
+
+  log('Создан вызываемый абонент:', calledUserData);
+
+  return calledUserData;
+}
+
+interface CallResult {
+  client_answer: string; // Последний ответ
+  rating: number | null;
+  status: boolean;
+}
+
+async function scriptEnd(result: CallResult) {
+  log('Результат звонка:', result);
+  VoxEngine.terminate();
+}
+
+async function main(): Promise<void> {
+  const data = VoxEngineService.getCustomData();
+  const { name, phone } = createCalledUserData(data);
+
+  const callControl = await CallControl.callPSTN(phone);
+  callControl.setCallTimeout(8000);
+
+  let result: string = '';
+
+  try {
+    const answer = await callControl.waitAnswer();
+    result = 'Дела идут хорошо';
+    await callControl.tell(answer || 'пок');
+
+    await callControl.hangup();
+  } catch (e) {
+    if (e instanceof CallDisconnectedException) {
+      if (!result) throw new ErrorInfo('main', `Результат не был получен, однако звонок завершён`, e.event, e.stack);
+
+      return await scriptEnd({ client_answer: result, status: true, rating: null });
+    }
+
+    throw e;
+  }
+}
+
+async function errorHandler(e: unknown): Promise<void> {
   const error = ErrorInfo.from(e);
 
-  Logger.write(`Error: ${error.toString()}`);
+  log('Error:', error);
 
   await CallListService.reportError(error);
 
   VoxEngine.terminate();
 }
 
-async function handleStarted(): Promise<void> {
+async function startedHandler(): Promise<void> {
   try {
     await main();
   } catch (e) {
-    await handleError(e);
+    await errorHandler(e);
   }
 }
 
-VoxEngine.addEventListener(AppEvents.Started, handleStarted);
+VoxEngine.addEventListener(AppEvents.Started, startedHandler);
