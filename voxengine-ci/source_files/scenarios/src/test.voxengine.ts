@@ -1,3 +1,8 @@
+// TypeScript file test.voxengine.ts here:
+// https://github.com/Pinkierar/voximplant-test/blob/master/voxengine-ci/source_files/scenarios/src/test.voxengine.ts
+
+require(Modules.ASR);
+
 /// region ==== PREPARATION ================================
 
 // region includes
@@ -121,7 +126,7 @@ class PromiseControl<Result, Args extends any[] = []> {
   ) {}
 
   public run(...args: Args): Promise<Result> {
-    log(`Промис "${this.description}" создаётся...`, { args });
+    log(`Промис "${this.description}" создаётся...`);
 
     if (this.controlledPromise) throw new ErrorInfo('PromiseControl.run', `Промис "${this.description}" уже создан`);
 
@@ -302,13 +307,195 @@ class VoxEngineService {
 
 // endregion services
 
-// region CallControl
+// region Scenario
 
-class CallDisconnectedException extends Error {
-  public constructor(public readonly event: _DisconnectedEvent) {
-    super(event.reason);
+class ScenarioStoppedException<StopObject = any> extends Error {
+  public constructor(public readonly stopObject: StopObject) {
+    super('scenario stopped');
   }
 }
+
+async function runScenario<Result>(
+  name: string,
+  scenario: (setResult: (value: Result) => void) => Promise<void>,
+): Promise<Result> {
+  let result: { value: Result } | undefined;
+
+  const setResult = (newResult: Result) => {
+    result = { value: newResult };
+  };
+
+  try {
+    log(`Сценарий "${name}" запущен`);
+    await scenario(setResult);
+  } catch (e) {
+    if (e instanceof ScenarioStoppedException) {
+      if (!result) {
+        throw new ErrorInfo(
+          'runScenario',
+          `Результат не был получен, однако сценарий "${name}" остановлен`,
+          e.stopObject,
+          e.stack,
+        );
+      }
+
+      return result.value;
+    }
+
+    throw e;
+  }
+
+  if (!result) {
+    throw new ErrorInfo('runScenario', `Результат не был получен, однако сценарий "${name}" завершился`);
+  }
+
+  return result.value;
+}
+
+// endregion Scenario
+
+// region ASRControl
+
+/**
+ * @fix The original _ASREvents interface contains keys without the "ASR." prefix, but the event names in the ASREvents enum contain them.
+ */
+interface _ASREvents {
+  'ASR.Error': _ASRErrorEvent;
+  'ASR.Started': _ASREvent;
+  'ASR.CaptureStarted': _ASREvent;
+  'ASR.SpeechCaptured': _ASREvent;
+  'ASR.Result': _ASRResultEvent;
+  'ASR.InterimResult': _ASRInterimResultEvent;
+  'ASR.Stopped': _ASRStoppedEvent;
+}
+
+class ASRStoppedException extends ScenarioStoppedException<_ASRStoppedEvent> {}
+
+class ASRControl {
+  private static readonly MinimumConfidence = 0;
+
+  private endObject?: unknown;
+  private mediaFromCallEnabled = false;
+
+  private timeout?: NodeJS.Timeout;
+  private resultAwaiter: EventAwaiter<_ASREvents, ASREvents.Result>;
+
+  private constructor(
+    private readonly call: Call,
+    private readonly asr: ASR,
+    // TODO: phraseHints: string[]
+  ) {
+    this.resultAwaiter = new EventAwaiter<_ASREvents, ASREvents.Result>('ASR Result', this.asr, ASREvents.Result);
+
+    this.startCompletionHandling();
+
+    this.startMediaFromCall();
+    this.asr.addEventListener(ASREvents.SpeechCaptured, () => {
+      this.stopMediaFromCall();
+    });
+
+    log('Создано управление распознаванием речи');
+  }
+
+  public static createASR(call: Call): ASRControl {
+    log('Создаётся и запускается распознавание речи...');
+    const asr = VoxEngine.createASR({ profile: ASRProfileList.Google.ru_RU, singleUtterance: true } as ASRParameters);
+
+    return ASRControl.from(call, asr);
+  }
+
+  public static from(call: Call, asr: ASR): ASRControl {
+    return new ASRControl(call, asr);
+  }
+
+  public stopSpeechRecognition() {
+    this.asr.stop();
+  }
+
+  public setSpeechRecognitionTimeout(ms: number) {
+    if (this.endObject) throw this.endObject;
+
+    log(`Для распознавания речи установлено ограничение по времени: ${ms}ms`);
+
+    this.timeout = setTimeout(() => {
+      log('Распознавание речи завершается из-за ограничения по времени');
+
+      this.stopSpeechRecognition();
+    }, ms);
+  }
+
+  public async recognizeSpeech(): Promise<string> {
+    if (this.endObject) throw this.endObject;
+
+    try {
+      const { confidence, text } = await this.resultAwaiter.wait();
+      this.stopSpeechRecognition();
+
+      if (confidence <= ASRControl.MinimumConfidence) {
+        log(`Распознавание речи дало слишком неоднозначный результат: "${text}".`, `Точность: ${confidence}`);
+
+        return '';
+      }
+
+      log(`Результат распознавания: "${text}".`, `Точность: ${confidence}`);
+
+      return text;
+    } catch (e) {
+      if (e instanceof ASRStoppedException) {
+        log('Распознавание речи ничего не услышало');
+
+        return '';
+      }
+
+      throw e;
+    }
+  }
+
+  private startMediaFromCall() {
+    if (this.mediaFromCallEnabled) return;
+
+    log('Звук звонка направляется в ASR...');
+    this.call.sendMediaTo(this.asr as VoxMediaUnit);
+
+    this.mediaFromCallEnabled = true;
+  }
+
+  private stopMediaFromCall() {
+    if (!this.mediaFromCallEnabled) return;
+
+    log('Звук звонка отключается от ASR...');
+    this.call.stopMediaTo(this.asr as VoxMediaUnit);
+
+    this.mediaFromCallEnabled = false;
+  }
+
+  private startCompletionHandling() {
+    const complete = (error: unknown) => {
+      this.endObject = error;
+
+      log('Распознавание речи остановлено');
+
+      this.stopMediaFromCall();
+
+      clearTimeout(this.timeout);
+      this.resultAwaiter.reject(error);
+    };
+
+    this.asr.addEventListener<'Stopped'>(ASREvents.Stopped, (event) => {
+      complete(new ASRStoppedException(event));
+    });
+
+    this.asr.addEventListener<'ASRError'>(ASREvents.ASRError, ({ error }) => {
+      complete(new ErrorInfo('ASRControl.startCompletionHandling', 'Ошибка распознавания речи', { error }));
+    });
+  }
+}
+
+// endregion ASRControl
+
+// region CallControl
+
+class CallDisconnectedException extends ScenarioStoppedException<_DisconnectedEvent> {}
 
 class CallControl {
   private readonly call: Call;
@@ -336,16 +523,20 @@ class CallControl {
    * Call the specified number and wait for a successful connection
    */
   public static async callPSTN(phone: string): Promise<CallControl> {
-    log('Вызов по номеру телефона', { phone });
+    log(`Вызов по номеру телефона: "${phone}"`);
     const call = VoxEngine.callPSTN(phone, 'default');
 
-    return await CallControl.reach(call);
+    return await CallControl.from(call);
   }
 
   /**
-   * Wait for a successful connection
+   * Wait for a successful connection and create instance
    */
-  private static async reach(call: Call): Promise<CallControl> {
+  public static from(call: Call): Promise<CallControl> {
+    if (call.state() === 'CONNECTED') {
+      throw new ErrorInfo('CallControl.from', 'Соединение с вызываемым абонентом уже установлено');
+    }
+
     return new Promise((resolve, reject) => {
       const errorHandler = (event: unknown) => {
         reject(new ErrorInfo('CallScript.call', 'Не удалось дозвониться', event));
@@ -360,9 +551,7 @@ class CallControl {
         call.removeEventListener(CallEvents.Failed, errorHandler);
         call.removeEventListener(CallEvents.Disconnected, errorHandler);
 
-        const callControl = new CallControl(call);
-
-        resolve(callControl);
+        resolve(new CallControl(call));
       });
     });
   }
@@ -370,7 +559,7 @@ class CallControl {
   /**
    * End the call immediately after time has expired
    */
-  public setCallTimeout(ms: number) {
+  public setCallTimeout(ms: number): void {
     if (this.endObject) throw this.endObject;
     log(`Установлено ограничение по времени: ${ms}ms`);
 
@@ -387,7 +576,7 @@ class CallControl {
   public async tell(text: string): Promise<void> {
     if (this.endObject) throw this.endObject;
 
-    log('Вызываемому абоненту говорится:', { text });
+    log(`Вызываемому абоненту говорится: "${text}"`);
     this.call.say(text, { language: VoiceList.Google.ru_RU_Standard_D });
     await this.playbackFinishedAwaiter.wait();
   }
@@ -404,48 +593,50 @@ class CallControl {
   }
 
   /**
-   * Wait for a response from the subscriber
+   * Распознать речь абонента
    */
-  public async waitAnswer(): Promise<string> {
+  public async recognizeSpeech(timeout?: number): Promise<string> {
     if (this.endObject) throw this.endObject;
 
-    return 'test';
+    return await runScenario<string>('ASR', async (setResult) => {
+      const asrControl = ASRControl.createASR(this.call);
+
+      if (timeout != null) {
+        asrControl.setSpeechRecognitionTimeout(timeout);
+      }
+
+      setResult(await asrControl.recognizeSpeech());
+    });
   }
 
   /**
    * End the call
    */
-  public async hangup(): Promise<void> {
+  public hangup(): void {
     if (this.endObject) throw this.endObject;
 
     log('Звонок завершается');
 
-    setTimeout(() => {
-      this.call.hangup();
-    });
-
-    await this.sleeper.sleep(60000);
-
-    throw new ErrorInfo('CallControl.hangup', 'Событие Disconnected не вызвалось в течении минуты');
+    this.call.hangup();
   }
 
   private startCompletionHandling() {
-    const errorHandler = (error: unknown) => {
-      this.endObject = error;
+    const complete = (endObject: unknown) => {
+      this.endObject = endObject;
 
       log('Звонок завершён');
 
       clearTimeout(this.timeout);
-      this.playbackFinishedAwaiter.reject(error);
-      this.sleeper.scareUp(error);
+      this.playbackFinishedAwaiter.reject(endObject);
+      this.sleeper.scareUp(endObject);
     };
 
     this.call.addEventListener(CallEvents.Failed, (event) => {
-      errorHandler(new ErrorInfo('CallScript.call', 'Ошибка звонка', event));
+      complete(new ErrorInfo('CallScript.call', 'Ошибка звонка', event));
     });
 
     this.call.addEventListener(CallEvents.Disconnected, (event) => {
-      errorHandler(new CallDisconnectedException(event));
+      complete(new CallDisconnectedException(event));
     });
   }
 }
@@ -497,25 +688,24 @@ async function main(): Promise<void> {
   const { name, phone } = createCalledUserData(data);
 
   const callControl = await CallControl.callPSTN(phone);
-  callControl.setCallTimeout(8000);
+  callControl.setCallTimeout(30000);
 
-  let result: string = '';
+  const result = await runScenario<string>('Call', async (setResult) => {
+    await callControl.tell('ну');
 
-  try {
-    const answer = await callControl.waitAnswer();
-    result = 'Дела идут хорошо';
-    await callControl.tell(answer || 'пок');
+    const answer1 = await callControl.recognizeSpeech(10000);
+    if (answer1 !== '') {
+      setResult(answer1);
 
-    await callControl.hangup();
-  } catch (e) {
-    if (e instanceof CallDisconnectedException) {
-      if (!result) throw new ErrorInfo('main', `Результат не был получен, однако звонок завершён`, e.event, e.stack);
-
-      return await scriptEnd({ client_answer: result, status: true, rating: null });
+      await callControl.tell('да');
+    } else {
+      await callControl.tell('нет');
     }
 
-    throw e;
-  }
+    callControl.hangup();
+  });
+
+  return await scriptEnd({ client_answer: result, status: true, rating: null });
 }
 
 async function errorHandler(e: unknown): Promise<void> {

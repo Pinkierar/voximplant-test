@@ -16,6 +16,6 @@
   "include": [
     "src",
     "source_files/scenarios/src",
-    "node_modules/@voximplant/voxengine-ci/typings"
+    "node_modules/@voximplant/voxengine-ci/typings/voxengine.d.ts"
   ]
 }
