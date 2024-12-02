@@ -5,8 +5,8 @@
   "author": "Pinkierar",
   "license": "MIT",
   "scripts": {
-    "lint": "npx eslint ./src",
-    "lint:fix": "npx eslint ./src --fix",
+    "lint": "npx eslint ./source_files/scenarios/src && npx eslint ./src",
+    "lint:fix": "npx eslint ./source_files/scenarios/src --fix && npx eslint ./src --fix",
     "voxengine-ci-init": "cross-env VOX_CI_ROOT_PATH=source_files npx voxengine-ci init",
     "voxengine-ci-init:force": "cross-env VOX_CI_ROOT_PATH=source_files npx voxengine-ci init --force",
     "voxengine-ci-upload": "tsx src/deploy.ts"
