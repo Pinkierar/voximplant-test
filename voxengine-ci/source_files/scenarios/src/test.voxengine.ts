@@ -1,6 +1,23 @@
 // TypeScript file test.voxengine.ts here:
 // https://github.com/Pinkierar/voximplant-test/blob/master/voxengine-ci/source_files/scenarios/src/test.voxengine.ts
 
+/// region TS LIB
+
+/**
+ * Recursively unwraps the "awaited type" of a type. Non-promise "thenables" should resolve to `never`. This emulates the behavior of `await`.
+ */
+// @ts-ignore
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type Awaited<T> = T extends null | undefined
+  ? T // special case for `null | undefined` when not in `--strictNullChecks` mode
+  : T extends object & { then(onfulfilled: infer F, ...args: infer _): any } // `await` only unwraps object types with a callable `then`. Non-object types are not unwrapped
+    ? F extends (value: infer V, ...args: infer _) => any // if the argument to `then` is callable, extracts the first argument
+      ? Awaited<V> // recursively unwrap the value
+      : never // the argument to `then` was not callable
+    : T; // non-object or non-thenable
+
+/// endregion TS LIB
+
 require(Modules.ASR);
 
 /// region MAIN
@@ -26,7 +43,7 @@ class Rating {
   }
 
   public static getAllVariants(): string[] {
-    return Rating.list.flatMap(({ variants }) => variants);
+    return flatten(Rating.list.map(({ variants }) => variants));
   }
 }
 
@@ -49,19 +66,23 @@ async function main(): Promise<void> {
   const result = await runScenario<CallResult>('Call', async (setResult) => {
     setResult({ name, status: false, rating: null, client_answer: '' });
 
-    await callControl.silent(500);
+    await callControl.silent.start(500);
 
     for (let i = 0; i <= 1; i++) {
-      await callControl.tell('Добрый день! Оцените, пожалуйста, работу сервиса по пятибалльной шкале.');
+      await callControl.say.start('Добрый день! Оцените, пожалуйста, работу сервиса по пятибалльной шкале.');
 
       // {
-      //   const userRating = await callControl.recognizeSpeech({ timeout: 6000, phraseHints: Rating.getAllVariants() });
+      //   const userRating = await callControl.recognizeSpeech.start({
+      //     timeout: 6000,
+      //     phraseHints: Rating.getAllVariants(),
+      //   });
+      //
       //   if (userRating.status === AsrStatus.Result) {
       //     const rating = Rating.getByVariant(userRating.text);
       //     if (rating) {
       //       setResult({ name, status: true, rating: rating.value, client_answer: userRating.text });
       //
-      //       await callControl.tell('Спасибо за оценку! Всего доброго!');
+      //       await callControl.say.start('Спасибо за оценку! Всего доброго!');
       //
       //       return callControl.hangup();
       //     }
@@ -69,13 +90,14 @@ async function main(): Promise<void> {
       // }
 
       {
-        const userRating = await callControl.readTone({ timeout: 6000 });
+        const userRating = await callControl.readTone.start({ timeout: 6000 });
+
         if (userRating.status === ToneReaderStatus.Result) {
           const rating = Rating.getByVariant(userRating.tone);
           if (rating) {
             setResult({ name, status: true, rating: rating.value, client_answer: '' });
 
-            await callControl.tell('Спасибо за оценку! Всего доброго!');
+            await callControl.say.start('Спасибо за оценку! Всего доброго!');
 
             return callControl.hangup();
           }
@@ -83,7 +105,7 @@ async function main(): Promise<void> {
       }
     }
 
-    await callControl.tell('Не смог распознать ваш ответ! Всего доброго!');
+    await callControl.say.start('Не смог распознать ваш ответ! Всего доброго!');
 
     return callControl.hangup();
   });
@@ -116,7 +138,7 @@ async function errorHandler(e: unknown): Promise<void> {
     log('Ошибка при отправки ошибки в CallList', error);
   }
 
-  VoxEngine.terminate();
+  throw new Error(`${error.sender}: ${error.message}`);
 }
 
 // endregion main
@@ -223,6 +245,18 @@ class ErrorInfo extends Error {
   public override toString() {
     return JSON.stringify(this.toJSON(), null, 2);
   }
+}
+
+function flatten<T>(array: T[][]): T[] {
+  const result: T[] = [];
+
+  for (const item of array) {
+    for (const nestedItem of item) {
+      result.push(nestedItem);
+    }
+  }
+
+  return result;
 }
 
 function log(...messages: any[]) {
@@ -492,7 +526,7 @@ class VoxEngineService {
 
 // region Scenario
 
-class ScenarioStoppedException<StopObject = any> extends Error {
+class ScenarioStoppedException<StopObject> extends Error {
   public constructor(public readonly stopObject: StopObject) {
     super('scenario stopped');
   }
@@ -562,7 +596,7 @@ const enum AsrStatus {
   Result,
 }
 
-interface SpeechRecognitionOptions {
+interface AsrOptions {
   timeout?: number;
   phraseHints?: string[];
 }
@@ -688,6 +722,194 @@ class AsrControl {
 
 // endregion AsrControl
 
+class InterruptionException extends ScenarioStoppedException<string> {
+  public constructor() {
+    super('interruption');
+  }
+}
+
+abstract class Interruptible<Args extends any[], Result> {
+  private readonly onBeforeStart?: (...args: Args) => void;
+  private readonly onBeforeStop?: (stopObject: unknown) => void;
+
+  protected constructor(
+    options: {
+      onBeforeStart?: (...args: Args) => void;
+      onBeforeStop?: (stopObject: unknown) => void;
+    } = {},
+  ) {
+    this.onBeforeStart = options.onBeforeStart;
+    this.onBeforeStop = options.onBeforeStop;
+  }
+
+  protected abstract onStart(...args: Args): Promise<Result>;
+
+  protected abstract onStop(stopObject: unknown): void;
+
+  public async start(...args: Args): Promise<Result> {
+    this.onBeforeStart?.(...args);
+
+    return await this.onStart(...args);
+  }
+
+  public stop(stopObject: unknown = new InterruptionException()) {
+    this.onBeforeStop?.(stopObject);
+
+    this.onStop(stopObject);
+  }
+}
+
+class SpeechManager extends Interruptible<[text: string], void> {
+  private readonly call: Call;
+  private readonly playbackFinishedAwaiter: EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>;
+
+  public constructor(call: Call, onBeforeStart: () => void) {
+    super({ onBeforeStart });
+
+    this.call = call;
+
+    this.playbackFinishedAwaiter = new EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>(
+      'PlaybackFinished',
+      this.call,
+      CallEvents.PlaybackFinished,
+    );
+  }
+
+  protected onStart(text: string): Promise<void> {
+    return runScenario<void>('Speaking', async (setResult) => {
+      setResult();
+
+      log(`Вызываемому абоненту говорится: "${text}"`);
+      this.call.say(text, { language: VoiceList.Google.ru_RU_Standard_D });
+
+      await this.playbackFinishedAwaiter.wait();
+    });
+  }
+
+  protected onStop(stopObject: unknown): void {
+    this.playbackFinishedAwaiter.reject(stopObject);
+
+    this.call.stopPlayback();
+  }
+}
+
+class ToneReadingManager extends Interruptible<[options: ToneReaderOptions], ToneReaderResult> {
+  private readonly call: Call;
+  private toneReaderTimeout?: NodeJS.Timeout;
+  private readonly toneReceivedAwaiter: EventAwaiter<_CallEvents, CallEvents.ToneReceived>;
+
+  public constructor(call: Call, onBeforeStart: () => void) {
+    super({ onBeforeStart });
+
+    this.call = call;
+
+    this.toneReceivedAwaiter = new EventAwaiter<_CallEvents, CallEvents.ToneReceived>(
+      'ToneReceived',
+      this.call,
+      CallEvents.ToneReceived,
+    );
+  }
+
+  protected onStart(options: ToneReaderOptions): Promise<ToneReaderResult> {
+    return runScenario<ToneReaderResult>('ToneReading', async (setResult) => {
+      this.call.handleTones(true);
+
+      setResult({ status: ToneReaderStatus.Empty });
+
+      log('Ожидание ввода с цифровой клавиатуры');
+
+      if (options.timeout != null) {
+        log(`Установлено ограничение по времени для ввода с клавиатуры: ${options.timeout}ms`);
+
+        this.toneReaderTimeout = setTimeout(() => {
+          log('Ожидание ввода с клавиатуры отменяется из-за ограничения по времени...');
+
+          this.toneReceivedAwaiter.reject(new ToneReaderTimeoutException());
+        }, options.timeout);
+      }
+
+      const { tone } = await this.toneReceivedAwaiter.wait();
+      clearTimeout(this.toneReaderTimeout);
+
+      log(`Получен текст с цифровой клавиатуры: "${tone}"`);
+
+      setResult({ status: ToneReaderStatus.Result, tone });
+    });
+  }
+
+  protected onStop(stopObject: unknown): void {
+    if (this.toneReaderTimeout) clearTimeout(this.toneReaderTimeout);
+    this.toneReceivedAwaiter.reject(stopObject);
+    this.call.handleTones(false);
+  }
+}
+
+class SpeechRecognizingManager extends Interruptible<[options: AsrOptions], AsrResult> {
+  private readonly call: Call;
+  private asrControl?: AsrControl;
+
+  public constructor(call: Call, onBeforeStart: () => void) {
+    super({ onBeforeStart });
+
+    this.call = call;
+  }
+
+  protected onStart(options: AsrOptions): Promise<AsrResult> {
+    return runScenario<AsrResult>('SpeechRecognition', async (setResult) => {
+      const asrControl = AsrControl.createAsr(this.call, options.phraseHints);
+
+      if (options.timeout != null) {
+        asrControl.setSpeechRecognitionTimeout(options.timeout);
+      }
+
+      this.asrControl = asrControl;
+
+      setResult({ status: AsrStatus.Silence });
+
+      const { confidence, text } = await asrControl.recognizeSpeech();
+
+      if (confidence > AsrControl.MinimumConfidence) {
+        log(`Результат распознавания: "${text}". Точность: ${confidence}`);
+        setResult({ status: AsrStatus.Result, text });
+      } else {
+        log(`Распознавание речи дало слишком неоднозначный результат: "${text}". Точность: ${confidence}`);
+        setResult({ status: AsrStatus.NotRecognized });
+      }
+
+      asrControl.stop();
+    });
+  }
+
+  protected onStop(stopObject: unknown): void {
+    if (this.asrControl) this.asrControl.rejectAll(stopObject);
+  }
+}
+
+class SilenceManager extends Interruptible<[ms: number], void> {
+  private readonly call: Call;
+  private readonly silentSleeper = new Sleeper();
+
+  public constructor(call: Call, onBeforeStart: () => void) {
+    super({ onBeforeStart });
+
+    this.call = call;
+  }
+
+  protected onStart(ms: number): Promise<void> {
+    return runScenario<void>('silent', async (setResult) => {
+      setResult();
+
+      log(`Ничего не происходит ${ms}ms`);
+
+      await this.silentSleeper.sleep(ms);
+    });
+  }
+
+  protected onStop(stopObject: unknown): void {
+    this.silentSleeper.scareUp(stopObject);
+  }
+}
+
 // region CallControl
 
 class CallDisconnectedException extends ScenarioStoppedException<_DisconnectedEvent> {}
@@ -723,29 +945,29 @@ class CallControl {
   private endObject?: unknown;
 
   private callTimeout?: NodeJS.Timeout;
-  private asrControl?: AsrControl;
-  private toneReaderTimeout?: NodeJS.Timeout;
-  private readonly silentSleeper = new Sleeper();
-  private readonly playbackFinishedAwaiter: EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>;
-  private readonly toneReceivedAwaiter: EventAwaiter<_CallEvents, CallEvents.ToneReceived>;
+
+  public readonly say: SpeechManager;
+  public readonly silent: SilenceManager;
+  public readonly readTone: ToneReadingManager;
+  public readonly recognizeSpeech: SpeechRecognizingManager;
 
   private constructor(call: Call) {
     this.call = call;
 
+    const boundThrowIfEnded = this.throwIfEnded.bind(this);
+
+    this.say = new SpeechManager(this.call, boundThrowIfEnded);
+    this.readTone = new ToneReadingManager(this.call, boundThrowIfEnded);
+    this.recognizeSpeech = new SpeechRecognizingManager(this.call, boundThrowIfEnded);
+    this.silent = new SilenceManager(this.call, boundThrowIfEnded);
+
     this.startCompletionHandling();
 
-    this.playbackFinishedAwaiter = new EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>(
-      'PlaybackFinished',
-      this.call,
-      CallEvents.PlaybackFinished,
-    );
-    this.toneReceivedAwaiter = new EventAwaiter<_CallEvents, CallEvents.ToneReceived>(
-      'ToneReceived',
-      this.call,
-      CallEvents.ToneReceived,
-    );
-
     log('Создано управление звонком');
+  }
+
+  private throwIfEnded(): void {
+    if (this.endObject) throw this.endObject;
   }
 
   /**
@@ -789,7 +1011,8 @@ class CallControl {
    * End the call immediately after time has expired
    */
   public setCallTimeout(ms: number): void {
-    if (this.endObject) throw this.endObject;
+    this.throwIfEnded();
+
     log(`Установлено ограничение по времени: ${ms}ms`);
 
     this.callTimeout = setTimeout(() => {
@@ -800,102 +1023,17 @@ class CallControl {
   }
 
   /**
-   * Tell the subscriber
-   */
-  public async tell(text: string): Promise<void> {
-    if (this.endObject) throw this.endObject;
-
-    log(`Вызываемому абоненту говорится: "${text}"`);
-    this.call.say(text, { language: VoiceList.Google.ru_RU_Standard_D });
-    await this.playbackFinishedAwaiter.wait();
-  }
-
-  /**
-   * Wait the specified number of milliseconds
-   */
-  public async silent(delay: number): Promise<void> {
-    if (this.endObject) throw this.endObject;
-
-    log(`Ничего не происходит ${delay}ms`);
-
-    await this.silentSleeper.sleep(delay);
-  }
-
-  /**
-   * Recognize subscriber's speech.
-   */
-  public async recognizeSpeech(options: SpeechRecognitionOptions = {}): Promise<AsrResult> {
-    if (this.endObject) throw this.endObject;
-
-    const asrControl = AsrControl.createAsr(this.call, options.phraseHints);
-
-    if (options.timeout != null) {
-      asrControl.setSpeechRecognitionTimeout(options.timeout);
-    }
-
-    this.asrControl = asrControl;
-
-    return await runScenario<AsrResult>('SpeechRecognition', async (setResult) => {
-      setResult({ status: AsrStatus.Silence });
-
-      const { confidence, text } = await asrControl.recognizeSpeech();
-
-      if (confidence > AsrControl.MinimumConfidence) {
-        log(`Результат распознавания: "${text}". Точность: ${confidence}`);
-        setResult({ status: AsrStatus.Result, text });
-      } else {
-        log(`Распознавание речи дало слишком неоднозначный результат: "${text}". Точность: ${confidence}`);
-        setResult({ status: AsrStatus.NotRecognized });
-      }
-
-      asrControl.stop();
-    });
-  }
-
-  /**
-   * Receive input from the numeric keypad.
-   */
-  public async readTone(options: ToneReaderOptions = {}): Promise<ToneReaderResult> {
-    if (this.endObject) throw this.endObject;
-
-    this.call.handleTones(true);
-
-    return runScenario<ToneReaderResult>('ToneReader', async (setResult) => {
-      setResult({ status: ToneReaderStatus.Empty });
-
-      log('Ожидание ввода с цифровой клавиатуры');
-
-      if (options.timeout != null) {
-        log(`Установлено ограничение по времени для ввода с клавиатуры: ${options.timeout}ms`);
-
-        this.toneReaderTimeout = setTimeout(() => {
-          log('Ожидание ввода с клавиатуры отменяется из-за ограничения по времени...');
-
-          this.toneReceivedAwaiter.reject(new ToneReaderTimeoutException());
-        }, options.timeout);
-      }
-
-      const { tone } = await this.toneReceivedAwaiter.wait();
-      clearTimeout(this.toneReaderTimeout);
-
-      log(`Получен текст с цифровой клавиатуры: "${tone}"`);
-
-      setResult({ status: ToneReaderStatus.Result, tone });
-    });
-  }
-
-  /**
    * Reject all current actions.
    */
   public rejectAll(endObject: unknown): void {
     if (this.endObject) return;
 
     if (this.callTimeout) clearTimeout(this.callTimeout);
-    if (this.asrControl) this.asrControl.rejectAll(endObject);
-    if (this.toneReaderTimeout) clearTimeout(this.toneReaderTimeout);
-    this.playbackFinishedAwaiter.reject(endObject);
-    this.toneReceivedAwaiter.reject(endObject);
-    this.silentSleeper.scareUp(endObject);
+
+    this.say.stop(endObject);
+    this.silent.stop(endObject);
+    this.recognizeSpeech.stop(endObject);
+    this.readTone.stop(endObject);
 
     this.endObject = endObject;
 
