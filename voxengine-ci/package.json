@@ -2,15 +2,17 @@
   "name": "voximplant-test-voxengine-ci",
   "version": "0.0.1",
   "author": "Pinkierar",
+  "type": "module",
   "scripts": {
     "voxengine-ci-init": "cross-env VOX_CI_ROOT_PATH=source_files npx voxengine-ci init",
     "voxengine-ci-init:force": "cross-env VOX_CI_ROOT_PATH=source_files npx voxengine-ci init --force",
-    "voxengine-ci-upload": "node deploy.js",
+    "voxengine-ci-upload": "tsx deploy.ts",
     "lint": "npx eslint ./source_files/scenarios/src",
     "lint:fix": "npx eslint ./source_files/scenarios/src --fix"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
-    "@voximplant/voxengine-ci": "^1.1.0"
+    "@voximplant/voxengine-ci": "^1.1.0",
+    "cross-env": "^7.0.3"
   }
 }
