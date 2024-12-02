@@ -1,190 +1,38 @@
 // TypeScript file test.voxengine.ts here:
 // https://github.com/Pinkierar/voximplant-test/blob/master/voxengine-ci/source_files/scenarios/src/test.voxengine.ts
 
-/// region TS LIB
+/// region TS FIXES
 
 /**
  * Recursively unwraps the "awaited type" of a type. Non-promise "thenables" should resolve to `never`. This emulates the behavior of `await`.
+ * @fix Missing, but used inside the lib.d.ts
  */
 // @ts-ignore
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type Awaited<T> = T extends null | undefined
-  ? T // special case for `null | undefined` when not in `--strictNullChecks` mode
-  : T extends object & { then(onfulfilled: infer F, ...args: infer _): any } // `await` only unwraps object types with a callable `then`. Non-object types are not unwrapped
-    ? F extends (value: infer V, ...args: infer _) => any // if the argument to `then` is callable, extracts the first argument
-      ? Awaited<V> // recursively unwrap the value
-      : never // the argument to `then` was not callable
-    : T; // non-object or non-thenable
+  ? T
+  : T extends object & { then(onfulfilled: infer F, ...args: infer _): any }
+    ? F extends (value: infer V, ...args: infer _) => any
+      ? Awaited<V>
+      : never
+    : T;
 
-/// endregion TS LIB
+/**
+ * @fix The original _ASREvents interface contains keys without the "ASR." prefix, but the event names in the ASREvents enum contain them.
+ */
+interface _ASREvents {
+  'ASR.Error': _ASRErrorEvent;
+  'ASR.Started': _ASREvent;
+  'ASR.CaptureStarted': _ASREvent;
+  'ASR.SpeechCaptured': _ASREvent;
+  'ASR.Result': _ASRResultEvent;
+  'ASR.InterimResult': _ASRInterimResultEvent;
+  'ASR.Stopped': _ASRStoppedEvent;
+}
+
+/// endregion TS FIXES
 
 require(Modules.ASR);
-
-/// region MAIN
-
-// region main
-
-class Rating {
-  private static readonly list = [
-    new Rating(1, ['1', 'один']),
-    new Rating(2, ['2', 'два']),
-    new Rating(3, ['3', 'три']),
-    new Rating(4, ['4', 'четыре']),
-    new Rating(5, ['5', 'пять']),
-  ];
-
-  private constructor(
-    public readonly value: number,
-    public readonly variants: string[],
-  ) {}
-
-  public static getByVariant(variant: string): Rating | null {
-    return Rating.list.find(({ variants }) => variants.includes(variant)) ?? null;
-  }
-
-  public static getAllVariants(): string[] {
-    return flatten(Rating.list.map(({ variants }) => variants));
-  }
-}
-
-interface CallResult {
-  name: string;
-  client_answer: string; // Последний ответ
-  rating: Rating['value'] | null;
-  status: boolean;
-}
-
-async function main(): Promise<void> {
-  CallListService.init();
-  const data = VoxEngineService.getCustomDataAsObject();
-  const { name, phone } = createCalledUserData(data);
-  // const { name, phone } = createCalledUserData({ name: 'Гриша Романов', phone: '+79585477508' });
-
-  const callControl = await CallControl.callPSTN(phone);
-  callControl.setCallTimeout(60000);
-
-  const result = await runScenario<CallResult>('Call', async (setResult) => {
-    setResult({ name, status: false, rating: null, client_answer: '' });
-
-    await callControl.silent.start(500);
-
-    for (let i = 0; i <= 1; i++) {
-      await callControl.say.start('Добрый день! Оцените, пожалуйста, работу сервиса по пятибалльной шкале.');
-
-      // {
-      //   const userRating = await callControl.recognizeSpeech.start({
-      //     timeout: 6000,
-      //     phraseHints: Rating.getAllVariants(),
-      //   });
-      //
-      //   if (userRating.status === AsrStatus.Result) {
-      //     const rating = Rating.getByVariant(userRating.text);
-      //     if (rating) {
-      //       setResult({ name, status: true, rating: rating.value, client_answer: userRating.text });
-      //
-      //       await callControl.say.start('Спасибо за оценку! Всего доброго!');
-      //
-      //       return callControl.hangup();
-      //     }
-      //   }
-      // }
-
-      {
-        const userRating = await callControl.readTone.start({ timeout: 6000 });
-
-        if (userRating.status === ToneReaderStatus.Result) {
-          const rating = Rating.getByVariant(userRating.tone);
-          if (rating) {
-            setResult({ name, status: true, rating: rating.value, client_answer: '' });
-
-            await callControl.say.start('Спасибо за оценку! Всего доброго!');
-
-            return callControl.hangup();
-          }
-        }
-      }
-    }
-
-    await callControl.say.start('Не смог распознать ваш ответ! Всего доброго!');
-
-    return callControl.hangup();
-  });
-
-  return await saveResult(result);
-}
-
-async function saveResult(result: CallResult): Promise<void> {
-  log('Результат звонка:', result);
-
-  try {
-    await CallListService.reportResult(result);
-  } catch (e) {
-    const error = ErrorInfo.from(e);
-    log('Ошибка при отправки результата в CallList', error);
-  }
-
-  VoxEngine.terminate();
-}
-
-async function errorHandler(e: unknown): Promise<void> {
-  const error = ErrorInfo.from(e);
-
-  log('errorHandler:', error);
-
-  try {
-    await CallListService.reportError(error);
-  } catch (e) {
-    const error = ErrorInfo.from(e);
-    log('Ошибка при отправки ошибки в CallList', error);
-  }
-
-  throw new Error(`${error.sender}: ${error.message}`);
-}
-
-// endregion main
-
-// region CalledUserData
-
-interface CalledUserData {
-  readonly name: string;
-  readonly phone: string;
-}
-
-function createCalledUserData(data: object): CalledUserData {
-  if (!('phone' in data) || !data.phone || typeof data.phone !== 'string') {
-    throw new ErrorInfo('CalledUser.from', 'Номер телефона вызываемого абонента не удалось прочитать', { data });
-  }
-  const phone = data.phone;
-
-  if (!('name' in data) || !data.name || typeof data.name !== 'string') {
-    throw new ErrorInfo('CalledUser.from', 'Имя вызываемого абонента не удалось прочитать', { data });
-  }
-  const name = data.name;
-
-  const calledUserData: CalledUserData = { name, phone };
-
-  log('Создан вызываемый абонент:', calledUserData);
-
-  return calledUserData;
-}
-
-// endregion CalledUserData
-
-// region Started
-
-VoxEngine.addEventListener(AppEvents.Started, startedHandler);
-
-async function startedHandler(): Promise<void> {
-  try {
-    await main();
-  } catch (e) {
-    await errorHandler(e);
-  }
-}
-
-// endregion Started
-
-/// endregion MAIN
 
 /// region PREPARATION
 
@@ -573,20 +421,163 @@ async function runScenario<Result>(
 
 // endregion Scenario
 
-// region AsrControl
+// region Interruptible
 
-/**
- * @fix The original _ASREvents interface contains keys without the "ASR." prefix, but the event names in the ASREvents enum contain them.
- */
-interface _ASREvents {
-  'ASR.Error': _ASRErrorEvent;
-  'ASR.Started': _ASREvent;
-  'ASR.CaptureStarted': _ASREvent;
-  'ASR.SpeechCaptured': _ASREvent;
-  'ASR.Result': _ASRResultEvent;
-  'ASR.InterimResult': _ASRInterimResultEvent;
-  'ASR.Stopped': _ASRStoppedEvent;
+class InterruptionException extends ScenarioStoppedException<string> {
+  public constructor() {
+    super('interruption');
+  }
 }
+
+abstract class Interruptible<Args extends any[], Result> {
+  private readonly onBeforeStart?: (...args: Args) => void;
+  private readonly onBeforeStop?: (stopObject: unknown) => void;
+
+  protected constructor(
+    options: {
+      onBeforeStart?: (...args: Args) => void;
+      onBeforeStop?: (stopObject: unknown) => void;
+    } = {},
+  ) {
+    this.onBeforeStart = options.onBeforeStart;
+    this.onBeforeStop = options.onBeforeStop;
+  }
+
+  protected abstract onStart(...args: Args): Promise<Result>;
+
+  protected abstract onStop(stopObject: unknown): void;
+
+  public async start(...args: Args): Promise<Result> {
+    this.onBeforeStart?.(...args);
+
+    return await this.onStart(...args);
+  }
+
+  public stop(stopObject: unknown = new InterruptionException()) {
+    this.onBeforeStop?.(stopObject);
+
+    this.onStop(stopObject);
+  }
+}
+
+// endregion Interruptible
+
+class SpeechManager extends Interruptible<[text: string], void> {
+  private readonly call: Call;
+  private readonly playbackFinishedAwaiter: EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>;
+
+  public constructor(call: Call, onBeforeStart: () => void) {
+    super({ onBeforeStart });
+
+    this.call = call;
+
+    this.playbackFinishedAwaiter = new EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>(
+      'PlaybackFinished',
+      this.call,
+      CallEvents.PlaybackFinished,
+    );
+  }
+
+  protected onStart(text: string): Promise<void> {
+    return runScenario<void>('Speaking', async (setResult) => {
+      setResult();
+
+      log(`Вызываемому абоненту говорится: "${text}"`);
+      this.call.say(text, { language: VoiceList.Google.ru_RU_Standard_D });
+
+      await this.playbackFinishedAwaiter.wait();
+    });
+  }
+
+  protected onStop(stopObject: unknown): void {
+    this.playbackFinishedAwaiter.reject(stopObject);
+
+    this.call.stopPlayback();
+  }
+}
+
+// region ToneReadingManager
+
+class ToneReaderTimeoutException extends ScenarioStoppedException<string> {
+  public constructor() {
+    super('timeout');
+  }
+}
+
+interface ToneReaderOptions {
+  timeout?: number;
+  length?: number;
+}
+
+const enum ToneReaderStatus {
+  Empty,
+  Result,
+}
+
+type ToneReaderResult =
+  | {
+      tone: string;
+      status: ToneReaderStatus.Result;
+    }
+  | {
+      tone?: never;
+      status: ToneReaderStatus.Empty;
+    };
+
+class ToneReadingManager extends Interruptible<[options: ToneReaderOptions], ToneReaderResult> {
+  private readonly call: Call;
+  private toneReaderTimeout?: NodeJS.Timeout;
+  private readonly toneReceivedAwaiter: EventAwaiter<_CallEvents, CallEvents.ToneReceived>;
+
+  public constructor(call: Call, onBeforeStart: () => void) {
+    super({ onBeforeStart });
+
+    this.call = call;
+
+    this.toneReceivedAwaiter = new EventAwaiter<_CallEvents, CallEvents.ToneReceived>(
+      'ToneReceived',
+      this.call,
+      CallEvents.ToneReceived,
+    );
+  }
+
+  protected onStart(options: ToneReaderOptions): Promise<ToneReaderResult> {
+    return runScenario<ToneReaderResult>('ToneReading', async (setResult) => {
+      this.call.handleTones(true);
+
+      setResult({ status: ToneReaderStatus.Empty });
+
+      log('Ожидание ввода с цифровой клавиатуры');
+
+      if (options.timeout != null) {
+        log(`Установлено ограничение по времени для ввода с клавиатуры: ${options.timeout}ms`);
+
+        this.toneReaderTimeout = setTimeout(() => {
+          log('Ожидание ввода с клавиатуры отменяется из-за ограничения по времени...');
+
+          this.toneReceivedAwaiter.reject(new ToneReaderTimeoutException());
+        }, options.timeout);
+      }
+
+      const { tone } = await this.toneReceivedAwaiter.wait();
+      clearTimeout(this.toneReaderTimeout);
+
+      log(`Получен текст с цифровой клавиатуры: "${tone}"`);
+
+      setResult({ status: ToneReaderStatus.Result, tone });
+    });
+  }
+
+  protected onStop(stopObject: unknown): void {
+    if (this.toneReaderTimeout) clearTimeout(this.toneReaderTimeout);
+    this.toneReceivedAwaiter.reject(stopObject);
+    this.call.handleTones(false);
+  }
+}
+
+// endregion ToneReadingManager
+
+// region AsrManager
 
 class AsrStoppedException extends ScenarioStoppedException<_ASRStoppedEvent> {}
 
@@ -720,131 +711,7 @@ class AsrControl {
   }
 }
 
-// endregion AsrControl
-
-class InterruptionException extends ScenarioStoppedException<string> {
-  public constructor() {
-    super('interruption');
-  }
-}
-
-abstract class Interruptible<Args extends any[], Result> {
-  private readonly onBeforeStart?: (...args: Args) => void;
-  private readonly onBeforeStop?: (stopObject: unknown) => void;
-
-  protected constructor(
-    options: {
-      onBeforeStart?: (...args: Args) => void;
-      onBeforeStop?: (stopObject: unknown) => void;
-    } = {},
-  ) {
-    this.onBeforeStart = options.onBeforeStart;
-    this.onBeforeStop = options.onBeforeStop;
-  }
-
-  protected abstract onStart(...args: Args): Promise<Result>;
-
-  protected abstract onStop(stopObject: unknown): void;
-
-  public async start(...args: Args): Promise<Result> {
-    this.onBeforeStart?.(...args);
-
-    return await this.onStart(...args);
-  }
-
-  public stop(stopObject: unknown = new InterruptionException()) {
-    this.onBeforeStop?.(stopObject);
-
-    this.onStop(stopObject);
-  }
-}
-
-class SpeechManager extends Interruptible<[text: string], void> {
-  private readonly call: Call;
-  private readonly playbackFinishedAwaiter: EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>;
-
-  public constructor(call: Call, onBeforeStart: () => void) {
-    super({ onBeforeStart });
-
-    this.call = call;
-
-    this.playbackFinishedAwaiter = new EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>(
-      'PlaybackFinished',
-      this.call,
-      CallEvents.PlaybackFinished,
-    );
-  }
-
-  protected onStart(text: string): Promise<void> {
-    return runScenario<void>('Speaking', async (setResult) => {
-      setResult();
-
-      log(`Вызываемому абоненту говорится: "${text}"`);
-      this.call.say(text, { language: VoiceList.Google.ru_RU_Standard_D });
-
-      await this.playbackFinishedAwaiter.wait();
-    });
-  }
-
-  protected onStop(stopObject: unknown): void {
-    this.playbackFinishedAwaiter.reject(stopObject);
-
-    this.call.stopPlayback();
-  }
-}
-
-class ToneReadingManager extends Interruptible<[options: ToneReaderOptions], ToneReaderResult> {
-  private readonly call: Call;
-  private toneReaderTimeout?: NodeJS.Timeout;
-  private readonly toneReceivedAwaiter: EventAwaiter<_CallEvents, CallEvents.ToneReceived>;
-
-  public constructor(call: Call, onBeforeStart: () => void) {
-    super({ onBeforeStart });
-
-    this.call = call;
-
-    this.toneReceivedAwaiter = new EventAwaiter<_CallEvents, CallEvents.ToneReceived>(
-      'ToneReceived',
-      this.call,
-      CallEvents.ToneReceived,
-    );
-  }
-
-  protected onStart(options: ToneReaderOptions): Promise<ToneReaderResult> {
-    return runScenario<ToneReaderResult>('ToneReading', async (setResult) => {
-      this.call.handleTones(true);
-
-      setResult({ status: ToneReaderStatus.Empty });
-
-      log('Ожидание ввода с цифровой клавиатуры');
-
-      if (options.timeout != null) {
-        log(`Установлено ограничение по времени для ввода с клавиатуры: ${options.timeout}ms`);
-
-        this.toneReaderTimeout = setTimeout(() => {
-          log('Ожидание ввода с клавиатуры отменяется из-за ограничения по времени...');
-
-          this.toneReceivedAwaiter.reject(new ToneReaderTimeoutException());
-        }, options.timeout);
-      }
-
-      const { tone } = await this.toneReceivedAwaiter.wait();
-      clearTimeout(this.toneReaderTimeout);
-
-      log(`Получен текст с цифровой клавиатуры: "${tone}"`);
-
-      setResult({ status: ToneReaderStatus.Result, tone });
-    });
-  }
-
-  protected onStop(stopObject: unknown): void {
-    if (this.toneReaderTimeout) clearTimeout(this.toneReaderTimeout);
-    this.toneReceivedAwaiter.reject(stopObject);
-    this.call.handleTones(false);
-  }
-}
-
-class SpeechRecognizingManager extends Interruptible<[options: AsrOptions], AsrResult> {
+class AsrManager extends Interruptible<[options: AsrOptions], AsrResult> {
   private readonly call: Call;
   private asrControl?: AsrControl;
 
@@ -885,6 +752,8 @@ class SpeechRecognizingManager extends Interruptible<[options: AsrOptions], AsrR
   }
 }
 
+// endregion AsrManager
+
 class SilenceManager extends Interruptible<[ms: number], void> {
   private readonly call: Call;
   private readonly silentSleeper = new Sleeper();
@@ -914,32 +783,6 @@ class SilenceManager extends Interruptible<[ms: number], void> {
 
 class CallDisconnectedException extends ScenarioStoppedException<_DisconnectedEvent> {}
 
-class ToneReaderTimeoutException extends ScenarioStoppedException<string> {
-  public constructor() {
-    super('timeout');
-  }
-}
-
-interface ToneReaderOptions {
-  timeout?: number;
-  length?: number;
-}
-
-const enum ToneReaderStatus {
-  Empty,
-  Result,
-}
-
-type ToneReaderResult =
-  | {
-      tone: string;
-      status: ToneReaderStatus.Result;
-    }
-  | {
-      tone?: never;
-      status: ToneReaderStatus.Empty;
-    };
-
 class CallControl {
   private readonly call: Call;
   private endObject?: unknown;
@@ -949,7 +792,7 @@ class CallControl {
   public readonly say: SpeechManager;
   public readonly silent: SilenceManager;
   public readonly readTone: ToneReadingManager;
-  public readonly recognizeSpeech: SpeechRecognizingManager;
+  public readonly recognizeSpeech: AsrManager;
 
   private constructor(call: Call) {
     this.call = call;
@@ -958,7 +801,7 @@ class CallControl {
 
     this.say = new SpeechManager(this.call, boundThrowIfEnded);
     this.readTone = new ToneReadingManager(this.call, boundThrowIfEnded);
-    this.recognizeSpeech = new SpeechRecognizingManager(this.call, boundThrowIfEnded);
+    this.recognizeSpeech = new AsrManager(this.call, boundThrowIfEnded);
     this.silent = new SilenceManager(this.call, boundThrowIfEnded);
 
     this.startCompletionHandling();
@@ -1065,3 +908,169 @@ class CallControl {
 // endregion CallControl
 
 /// endregion PREPARATION
+
+/// region MAIN
+
+// region main
+
+class Rating {
+  private static readonly list = [
+    new Rating(1, ['1', 'один']),
+    new Rating(2, ['2', 'два']),
+    new Rating(3, ['3', 'три']),
+    new Rating(4, ['4', 'четыре']),
+    new Rating(5, ['5', 'пять']),
+  ];
+
+  private constructor(
+    public readonly value: number,
+    public readonly variants: string[],
+  ) {}
+
+  public static getByVariant(variant: string): Rating | null {
+    return Rating.list.find(({ variants }) => variants.includes(variant)) ?? null;
+  }
+
+  public static getAllVariants(): string[] {
+    return flatten(Rating.list.map(({ variants }) => variants));
+  }
+}
+
+interface CallResult {
+  name: string;
+  client_answer: string; // Последний ответ
+  rating: Rating['value'] | null;
+  status: boolean;
+}
+
+async function main(): Promise<void> {
+  CallListService.init();
+  const data = VoxEngineService.getCustomDataAsObject();
+  const { name, phone } = createCalledUserData(data);
+  // const { name, phone } = createCalledUserData({ name: 'Гриша Романов', phone: '+79585477508' });
+
+  const callControl = await CallControl.callPSTN(phone);
+  callControl.setCallTimeout(60000);
+
+  const result = await runScenario<CallResult>('Call', async (setResult) => {
+    setResult({ name, status: false, rating: null, client_answer: '' });
+
+    await callControl.silent.start(500);
+
+    for (let i = 0; i <= 1; i++) {
+      await callControl.say.start('Добрый день! Оцените, пожалуйста, работу сервиса по пятибалльной шкале.');
+
+      // {
+      //   const userRating = await callControl.recognizeSpeech.start({
+      //     timeout: 6000,
+      //     phraseHints: Rating.getAllVariants(),
+      //   });
+      //
+      //   if (userRating.status === AsrStatus.Result) {
+      //     const rating = Rating.getByVariant(userRating.text);
+      //     if (rating) {
+      //       setResult({ name, status: true, rating: rating.value, client_answer: userRating.text });
+      //
+      //       await callControl.say.start('Спасибо за оценку! Всего доброго!');
+      //
+      //       return callControl.hangup();
+      //     }
+      //   }
+      // }
+
+      {
+        const userRating = await callControl.readTone.start({ timeout: 6000 });
+
+        if (userRating.status === ToneReaderStatus.Result) {
+          const rating = Rating.getByVariant(userRating.tone);
+          if (rating) {
+            setResult({ name, status: true, rating: rating.value, client_answer: '' });
+
+            await callControl.say.start('Спасибо за оценку! Всего доброго!');
+
+            return callControl.hangup();
+          }
+        }
+      }
+    }
+
+    await callControl.say.start('Не смог распознать ваш ответ! Всего доброго!');
+
+    return callControl.hangup();
+  });
+
+  return await saveResult(result);
+}
+
+async function saveResult(result: CallResult): Promise<void> {
+  log('Результат звонка:', result);
+
+  try {
+    await CallListService.reportResult(result);
+  } catch (e) {
+    const error = ErrorInfo.from(e);
+    log('Ошибка при отправки результата в CallList', error);
+  }
+
+  VoxEngine.terminate();
+}
+
+async function errorHandler(e: unknown): Promise<void> {
+  const error = ErrorInfo.from(e);
+
+  log('errorHandler:', error);
+
+  try {
+    await CallListService.reportError(error);
+  } catch (e) {
+    const error = ErrorInfo.from(e);
+    log('Ошибка при отправки ошибки в CallList', error);
+  }
+
+  throw new Error(`${error.sender}: ${error.message}`);
+}
+
+// endregion main
+
+// region CalledUserData
+
+interface CalledUserData {
+  readonly name: string;
+  readonly phone: string;
+}
+
+function createCalledUserData(data: object): CalledUserData {
+  if (!('phone' in data) || !data.phone || typeof data.phone !== 'string') {
+    throw new ErrorInfo('CalledUser.from', 'Номер телефона вызываемого абонента не удалось прочитать', { data });
+  }
+  const phone = data.phone;
+
+  if (!('name' in data) || !data.name || typeof data.name !== 'string') {
+    throw new ErrorInfo('CalledUser.from', 'Имя вызываемого абонента не удалось прочитать', { data });
+  }
+  const name = data.name;
+
+  const calledUserData: CalledUserData = { name, phone };
+
+  log('Создан вызываемый абонент:', calledUserData);
+
+  return calledUserData;
+}
+
+// endregion CalledUserData
+
+// region Started
+
+VoxEngine.addEventListener(AppEvents.Started, startedHandler);
+
+async function startedHandler(): Promise<void> {
+  try {
+    await main();
+  } catch (e) {
+    await errorHandler(e);
+  }
+}
+
+// endregion Started
+
+/// endregion MAIN

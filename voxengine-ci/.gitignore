@@ -1,3 +1,4 @@
+/tmp
 /node_modules
 /package-lock.json
 /.env
@@ -6,3 +7,4 @@
 /source_files/.voxengine-ci
 /source_files/applications
 /source_files/scenarios/dist
+/source_files/scenarios/src/*.js
