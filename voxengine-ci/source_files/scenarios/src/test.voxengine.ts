@@ -419,55 +419,57 @@ async function runScenario<Result>(
   return result.value;
 }
 
-// endregion Scenario
-
-// region Interruptible
-
-class InterruptionException extends ScenarioStoppedException<string> {
+class ScenarioInterruptionException extends ScenarioStoppedException<string> {
   public constructor() {
     super('interruption');
   }
 }
 
-abstract class Interruptible<Args extends any[], Result> {
+abstract class InterruptibleScenario<Args extends any[], Result> {
+  private readonly name: string;
+
   private readonly onBeforeStart?: (...args: Args) => void;
   private readonly onBeforeStop?: (stopObject: unknown) => void;
 
   protected constructor(
+    name: string,
     options: {
       onBeforeStart?: (...args: Args) => void;
       onBeforeStop?: (stopObject: unknown) => void;
     } = {},
   ) {
+    this.name = name;
     this.onBeforeStart = options.onBeforeStart;
     this.onBeforeStop = options.onBeforeStop;
   }
 
-  protected abstract onStart(...args: Args): Promise<Result>;
+  protected abstract onStart(setResult: (value: Result) => void, ...args: Args): Promise<void>;
 
   protected abstract onStop(stopObject: unknown): void;
 
-  public async start(...args: Args): Promise<Result> {
+  public start(...args: Args): Promise<Result> {
     this.onBeforeStart?.(...args);
 
-    return await this.onStart(...args);
+    return runScenario<Result>(this.name, async (setResult) => {
+      await this.onStart(setResult, ...args);
+    });
   }
 
-  public stop(stopObject: unknown = new InterruptionException()) {
+  public stop(stopObject: unknown = new ScenarioInterruptionException()) {
     this.onBeforeStop?.(stopObject);
 
     this.onStop(stopObject);
   }
 }
 
-// endregion Interruptible
+// endregion Scenario
 
-class SpeechManager extends Interruptible<[text: string], void> {
+class SpeechManager extends InterruptibleScenario<[text: string], void> {
   private readonly call: Call;
   private readonly playbackFinishedAwaiter: EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>;
 
   public constructor(call: Call, onBeforeStart: () => void) {
-    super({ onBeforeStart });
+    super('Speaking', { onBeforeStart });
 
     this.call = call;
 
@@ -478,15 +480,13 @@ class SpeechManager extends Interruptible<[text: string], void> {
     );
   }
 
-  protected onStart(text: string): Promise<void> {
-    return runScenario<void>('Speaking', async (setResult) => {
-      setResult();
+  protected async onStart(setResult: () => void, text: string): Promise<void> {
+    setResult();
 
-      log(`Вызываемому абоненту говорится: "${text}"`);
-      this.call.say(text, { language: VoiceList.Google.ru_RU_Standard_D });
+    log(`Вызываемому абоненту говорится: "${text}"`);
+    this.call.say(text, { language: VoiceList.Google.ru_RU_Standard_D });
 
-      await this.playbackFinishedAwaiter.wait();
-    });
+    await this.playbackFinishedAwaiter.wait();
   }
 
   protected onStop(stopObject: unknown): void {
@@ -524,13 +524,13 @@ type ToneReaderResult =
       status: ToneReaderStatus.Empty;
     };
 
-class ToneReadingManager extends Interruptible<[options: ToneReaderOptions], ToneReaderResult> {
+class ToneReadingManager extends InterruptibleScenario<[options: ToneReaderOptions], ToneReaderResult> {
   private readonly call: Call;
   private toneReaderTimeout?: NodeJS.Timeout;
   private readonly toneReceivedAwaiter: EventAwaiter<_CallEvents, CallEvents.ToneReceived>;
 
   public constructor(call: Call, onBeforeStart: () => void) {
-    super({ onBeforeStart });
+    super('ToneReading', { onBeforeStart });
 
     this.call = call;
 
@@ -541,31 +541,29 @@ class ToneReadingManager extends Interruptible<[options: ToneReaderOptions], Ton
     );
   }
 
-  protected onStart(options: ToneReaderOptions): Promise<ToneReaderResult> {
-    return runScenario<ToneReaderResult>('ToneReading', async (setResult) => {
-      this.call.handleTones(true);
+  protected async onStart(setResult: (value: ToneReaderResult) => void, options: ToneReaderOptions): Promise<void> {
+    this.call.handleTones(true);
 
-      setResult({ status: ToneReaderStatus.Empty });
+    setResult({ status: ToneReaderStatus.Empty });
 
-      log('Ожидание ввода с цифровой клавиатуры');
+    log('Ожидание ввода с цифровой клавиатуры');
 
-      if (options.timeout != null) {
-        log(`Установлено ограничение по времени для ввода с клавиатуры: ${options.timeout}ms`);
+    if (options.timeout != null) {
+      log(`Установлено ограничение по времени для ввода с клавиатуры: ${options.timeout}ms`);
 
-        this.toneReaderTimeout = setTimeout(() => {
-          log('Ожидание ввода с клавиатуры отменяется из-за ограничения по времени...');
+      this.toneReaderTimeout = setTimeout(() => {
+        log('Ожидание ввода с клавиатуры отменяется из-за ограничения по времени...');
 
-          this.toneReceivedAwaiter.reject(new ToneReaderTimeoutException());
-        }, options.timeout);
-      }
+        this.toneReceivedAwaiter.reject(new ToneReaderTimeoutException());
+      }, options.timeout);
+    }
 
-      const { tone } = await this.toneReceivedAwaiter.wait();
-      clearTimeout(this.toneReaderTimeout);
+    const { tone } = await this.toneReceivedAwaiter.wait();
+    clearTimeout(this.toneReaderTimeout);
 
-      log(`Получен текст с цифровой клавиатуры: "${tone}"`);
+    log(`Получен текст с цифровой клавиатуры: "${tone}"`);
 
-      setResult({ status: ToneReaderStatus.Result, tone });
-    });
+    setResult({ status: ToneReaderStatus.Result, tone });
   }
 
   protected onStop(stopObject: unknown): void {
@@ -711,40 +709,38 @@ class AsrControl {
   }
 }
 
-class AsrManager extends Interruptible<[options: AsrOptions], AsrResult> {
+class AsrManager extends InterruptibleScenario<[options: AsrOptions], AsrResult> {
   private readonly call: Call;
   private asrControl?: AsrControl;
 
   public constructor(call: Call, onBeforeStart: () => void) {
-    super({ onBeforeStart });
+    super('SpeechRecognition', { onBeforeStart });
 
     this.call = call;
   }
 
-  protected onStart(options: AsrOptions): Promise<AsrResult> {
-    return runScenario<AsrResult>('SpeechRecognition', async (setResult) => {
-      const asrControl = AsrControl.createAsr(this.call, options.phraseHints);
+  protected async onStart(setResult: (value: AsrResult) => void, options: AsrOptions): Promise<void> {
+    const asrControl = AsrControl.createAsr(this.call, options.phraseHints);
 
-      if (options.timeout != null) {
-        asrControl.setSpeechRecognitionTimeout(options.timeout);
-      }
+    if (options.timeout != null) {
+      asrControl.setSpeechRecognitionTimeout(options.timeout);
+    }
 
-      this.asrControl = asrControl;
+    this.asrControl = asrControl;
 
-      setResult({ status: AsrStatus.Silence });
+    setResult({ status: AsrStatus.Silence });
 
-      const { confidence, text } = await asrControl.recognizeSpeech();
+    const { confidence, text } = await asrControl.recognizeSpeech();
 
-      if (confidence > AsrControl.MinimumConfidence) {
-        log(`Результат распознавания: "${text}". Точность: ${confidence}`);
-        setResult({ status: AsrStatus.Result, text });
-      } else {
-        log(`Распознавание речи дало слишком неоднозначный результат: "${text}". Точность: ${confidence}`);
-        setResult({ status: AsrStatus.NotRecognized });
-      }
+    if (confidence > AsrControl.MinimumConfidence) {
+      log(`Результат распознавания: "${text}". Точность: ${confidence}`);
+      setResult({ status: AsrStatus.Result, text });
+    } else {
+      log(`Распознавание речи дало слишком неоднозначный результат: "${text}". Точность: ${confidence}`);
+      setResult({ status: AsrStatus.NotRecognized });
+    }
 
-      asrControl.stop();
-    });
+    asrControl.stop();
   }
 
   protected onStop(stopObject: unknown): void {
@@ -754,24 +750,19 @@ class AsrManager extends Interruptible<[options: AsrOptions], AsrResult> {
 
 // endregion AsrManager
 
-class SilenceManager extends Interruptible<[ms: number], void> {
-  private readonly call: Call;
+class SilenceManager extends InterruptibleScenario<[ms: number], void> {
   private readonly silentSleeper = new Sleeper();
 
-  public constructor(call: Call, onBeforeStart: () => void) {
-    super({ onBeforeStart });
-
-    this.call = call;
+  public constructor(onBeforeStart: () => void) {
+    super('Silence', { onBeforeStart });
   }
 
-  protected onStart(ms: number): Promise<void> {
-    return runScenario<void>('silent', async (setResult) => {
-      setResult();
+  protected async onStart(setResult: () => void, ms: number): Promise<void> {
+    setResult();
 
-      log(`Ничего не происходит ${ms}ms`);
+    log(`Ничего не происходит ${ms}ms`);
 
-      await this.silentSleeper.sleep(ms);
-    });
+    await this.silentSleeper.sleep(ms);
   }
 
   protected onStop(stopObject: unknown): void {
@@ -800,9 +791,9 @@ class CallControl {
     const boundThrowIfEnded = this.throwIfEnded.bind(this);
 
     this.say = new SpeechManager(this.call, boundThrowIfEnded);
+    this.silent = new SilenceManager(boundThrowIfEnded);
     this.readTone = new ToneReadingManager(this.call, boundThrowIfEnded);
     this.recognizeSpeech = new AsrManager(this.call, boundThrowIfEnded);
-    this.silent = new SilenceManager(this.call, boundThrowIfEnded);
 
     this.startCompletionHandling();
 
