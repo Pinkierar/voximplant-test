@@ -518,7 +518,7 @@ type AsrResult =
     };
 
 class AsrControl {
-  public static readonly MinimumConfidence = 0.51;
+  public static readonly MinimumConfidence = 55;
 
   private endObject?: unknown;
   private mediaFromCallEnabled = false;
@@ -591,24 +591,10 @@ class AsrControl {
     }, ms);
   }
 
-  public async recognizeSpeech(): Promise<AsrResult> {
+  public async recognizeSpeech(): Promise<_ASRResultEvent> {
     if (this.endObject) throw this.endObject;
 
-    return await runScenario<AsrResult>('SpeechRecognition', async (setResult) => {
-      setResult({ status: AsrStatus.Silence });
-
-      const { confidence, text } = await this.resultAwaiter.wait();
-
-      if (confidence > AsrControl.MinimumConfidence) {
-        log(`Результат распознавания: "${text}". Точность: ${confidence}`);
-        setResult({ status: AsrStatus.Result, text });
-      } else {
-        log(`Распознавание речи дало слишком неоднозначный результат: "${text}". Точность: ${confidence}`);
-        setResult({ status: AsrStatus.NotRecognized });
-      }
-
-      this.stop();
-    });
+    return await this.resultAwaiter.wait();
   }
 
   private startMediaFromCall(): void {
@@ -753,13 +739,29 @@ class CallControl {
   public async recognizeSpeech(options: CallSpeechRecognitionOptions = {}): Promise<AsrResult> {
     if (this.endObject) throw this.endObject;
 
-    this.asrControl = AsrControl.createAsr(this.call, options.phraseHints);
+    const asrControl = AsrControl.createAsr(this.call, options.phraseHints);
 
     if (options.timeout != null) {
-      this.asrControl.setSpeechRecognitionTimeout(options.timeout);
+      asrControl.setSpeechRecognitionTimeout(options.timeout);
     }
 
-    return await this.asrControl.recognizeSpeech();
+    this.asrControl = asrControl;
+
+    return await runScenario<AsrResult>('SpeechRecognition', async (setResult) => {
+      setResult({ status: AsrStatus.Silence });
+
+      const { confidence, text } = await asrControl.recognizeSpeech();
+
+      if (confidence > AsrControl.MinimumConfidence) {
+        log(`Результат распознавания: "${text}". Точность: ${confidence}`);
+        setResult({ status: AsrStatus.Result, text });
+      } else {
+        log(`Распознавание речи дало слишком неоднозначный результат: "${text}". Точность: ${confidence}`);
+        setResult({ status: AsrStatus.NotRecognized });
+      }
+
+      asrControl.stop();
+    });
   }
 
   /**
