@@ -1,0 +1,10 @@
+/local/
+/node_modules/
+
+/server/node_modules/
+/server/dist/
+
+/voxengine-ci/node_modules/
+/voxengine-ci/source_files/.voxengine-ci/
+/voxengine-ci/source_files/applications/
+/voxengine-ci/source_files/scenarios/dist/
