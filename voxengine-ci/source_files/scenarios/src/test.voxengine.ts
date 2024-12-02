@@ -95,6 +95,27 @@ class ErrorInfo extends Error {
   }
 }
 
+// /**
+//  * Wait for first resolve or last reject
+//  */
+// function waitResolve<Result>(promises: Promise<Result>[]): Promise<Result> {
+//   return new Promise((resolve, reject) => {
+//     let rejectedCount = 0;
+//
+//     for (const promise of promises) {
+//       promise.catch((e) => {
+//         rejectedCount++;
+//
+//         if (rejectedCount === promises.length) {
+//           reject(e);
+//         }
+//       });
+//
+//       promise.then(resolve);
+//     }
+//   });
+// }
+
 function flatten<T>(array: T[][]): T[] {
   const result: T[] = [];
 
@@ -374,9 +395,27 @@ class VoxEngineService {
 
 // region Scenario
 
-class ScenarioStoppedException<StopObject> extends Error {
+class ScenarioException<StopObject> extends Error {
   public constructor(public readonly stopObject: StopObject) {
     super('scenario stopped');
+  }
+}
+
+class ScenarioTimeoutException extends ScenarioException<string> {
+  public constructor() {
+    super('timeout');
+  }
+}
+
+class ScenarioInterruptionException extends ScenarioException<string> {
+  public constructor() {
+    super('interruption');
+  }
+}
+
+class RelatedScenarioHasResultException extends ScenarioException<string> {
+  public constructor() {
+    super('ended');
   }
 }
 
@@ -394,7 +433,7 @@ async function runScenario<Result>(
     log(`Сценарий "${name}" запущен`);
     await scenario(setResult);
   } catch (e) {
-    if (e instanceof ScenarioStoppedException) {
+    if (e instanceof ScenarioException) {
       if (!result) {
         throw new ErrorInfo(
           'runScenario',
@@ -419,47 +458,81 @@ async function runScenario<Result>(
   return result.value;
 }
 
-class ScenarioInterruptionException extends ScenarioStoppedException<string> {
-  public constructor() {
-    super('interruption');
-  }
-}
+type InterruptibleScenarioOptions<Args extends any[]> = {
+  onBeforeStart?: (...args: Args) => void;
+  onBeforeStop?: (stopObject: unknown) => void;
+  children?: InterruptibleScenario<any[], any>[];
+};
 
 abstract class InterruptibleScenario<Args extends any[], Result> {
-  private readonly name: string;
-
+  public readonly name: string;
+  private conflicting: InterruptibleScenario<any[], any>[] = [];
+  private children: InterruptibleScenario<any[], any>[] = [];
   private readonly onBeforeStart?: (...args: Args) => void;
   private readonly onBeforeStop?: (stopObject: unknown) => void;
 
-  protected constructor(
-    name: string,
-    options: {
-      onBeforeStart?: (...args: Args) => void;
-      onBeforeStop?: (stopObject: unknown) => void;
-    } = {},
-  ) {
+  private running: boolean = false;
+
+  protected constructor(name: string, options: InterruptibleScenarioOptions<Args> = {}) {
+    const { onBeforeStart, onBeforeStop, children = [] } = options;
+
     this.name = name;
-    this.onBeforeStart = options.onBeforeStart;
-    this.onBeforeStop = options.onBeforeStop;
+    this.children = children;
+    this.onBeforeStart = onBeforeStart;
+    this.onBeforeStop = onBeforeStop;
+  }
+
+  public start(...args: Args): Promise<Result> {
+    this.onBeforeStart?.(...args);
+
+    const runningConflicting = this.conflicting.find((scenario) => {
+      if (!scenario.running) return false;
+      if (scenario.children.includes(this)) return false;
+
+      return true;
+    });
+
+    if (runningConflicting) {
+      throw new ErrorInfo(
+        'InterruptibleScenario.start',
+        `Не удаётся запустить сценарий "${this.name}", так как работает конфликтующий сценарий "${runningConflicting.name}"`,
+      );
+    }
+
+    return runScenario<Result>(this.name, async (setResult) => {
+      this.running = true;
+
+      await this.onStart(setResult, ...args).finally(() => {
+        this.running = false;
+      });
+    });
+  }
+
+  public stop(stopObject: unknown = new ScenarioInterruptionException()) {
+    if (!this.running) return;
+
+    log(`Сценарий "${this.name}" прерывается...`);
+
+    this.onBeforeStop?.(stopObject);
+
+    this.onStop(stopObject);
+
+    // if (this.running) throw new ErrorInfo('InterruptibleScenario.stop', `Сценарий "${this.name}" не прервался`);
+  }
+
+  protected addConflicting(conflicting: InterruptibleScenario<any[], any>): void {
+    if (!this.conflicting.includes(conflicting)) {
+      this.conflicting.push(conflicting);
+    }
+
+    if (!conflicting.conflicting.includes(this)) {
+      conflicting.addConflicting(this);
+    }
   }
 
   protected abstract onStart(setResult: (value: Result) => void, ...args: Args): Promise<void>;
 
   protected abstract onStop(stopObject: unknown): void;
-
-  public start(...args: Args): Promise<Result> {
-    this.onBeforeStart?.(...args);
-
-    return runScenario<Result>(this.name, async (setResult) => {
-      await this.onStart(setResult, ...args);
-    });
-  }
-
-  public stop(stopObject: unknown = new ScenarioInterruptionException()) {
-    this.onBeforeStop?.(stopObject);
-
-    this.onStop(stopObject);
-  }
 }
 
 // endregion Scenario
@@ -497,12 +570,6 @@ class SpeechManager extends InterruptibleScenario<[text: string], void> {
 }
 
 // region ToneReadingManager
-
-class ToneReaderTimeoutException extends ScenarioStoppedException<string> {
-  public constructor() {
-    super('timeout');
-  }
-}
 
 interface ToneReaderOptions {
   timeout?: number;
@@ -554,7 +621,7 @@ class ToneReadingManager extends InterruptibleScenario<[options: ToneReaderOptio
       this.toneReaderTimeout = setTimeout(() => {
         log('Ожидание ввода с клавиатуры отменяется из-за ограничения по времени...');
 
-        this.toneReceivedAwaiter.reject(new ToneReaderTimeoutException());
+        this.toneReceivedAwaiter.reject(new ScenarioTimeoutException());
       }, options.timeout);
     }
 
@@ -563,11 +630,18 @@ class ToneReadingManager extends InterruptibleScenario<[options: ToneReaderOptio
 
     log(`Получен текст с цифровой клавиатуры: "${tone}"`);
 
-    setResult({ status: ToneReaderStatus.Result, tone });
+    let limited = tone;
+    if (options.length) {
+      limited = tone.slice(0, options.length);
+      log(`Длина текста с цифровой клавиатуры ограничена до ${options.length}: "${limited}"`);
+    }
+
+    setResult({ status: ToneReaderStatus.Result, tone: limited });
   }
 
   protected onStop(stopObject: unknown): void {
     if (this.toneReaderTimeout) clearTimeout(this.toneReaderTimeout);
+    log('toneReceivedAwaiter.reject');
     this.toneReceivedAwaiter.reject(stopObject);
     this.call.handleTones(false);
   }
@@ -577,7 +651,7 @@ class ToneReadingManager extends InterruptibleScenario<[options: ToneReaderOptio
 
 // region AsrManager
 
-class AsrStoppedException extends ScenarioStoppedException<_ASRStoppedEvent> {}
+class AsrStoppedException extends ScenarioException<_ASRStoppedEvent> {}
 
 const enum AsrStatus {
   Silence,
@@ -601,7 +675,7 @@ type AsrResult =
     };
 
 class AsrControl {
-  public static readonly MinimumConfidence = 55;
+  public static readonly MinimumConfidence = 15;
 
   private endObject?: unknown;
   private mediaFromCallEnabled = false;
@@ -750,6 +824,128 @@ class AsrManager extends InterruptibleScenario<[options: AsrOptions], AsrResult>
 
 // endregion AsrManager
 
+// region DigitReadingManager
+
+class Digit {
+  private static readonly list = [
+    new Digit(0, ['0', 'ноль']),
+    new Digit(1, ['1', 'один']),
+    new Digit(2, ['2', 'два']),
+    new Digit(3, ['3', 'три']),
+    new Digit(4, ['4', 'четыре']),
+    new Digit(5, ['5', 'пять']),
+    new Digit(6, ['6', 'шесть']),
+    new Digit(7, ['7', 'семь']),
+    new Digit(8, ['8', 'восемь']),
+    new Digit(9, ['9', 'девять']),
+  ];
+
+  private constructor(
+    public readonly value: number,
+    public readonly variants: string[],
+  ) {}
+
+  public static getByVariant(variant: string): Digit | undefined {
+    return Digit.list.find(({ variants }) => variants.includes(variant));
+  }
+
+  public static getAllVariants(): string[] {
+    return flatten(Digit.list.map(({ variants }) => variants));
+  }
+}
+
+interface DigitReaderOptions {
+  timeout?: number;
+}
+
+const enum DigitReaderStatus {
+  Empty,
+  Result,
+  BadValue,
+}
+
+type DigitReaderResult =
+  | {
+      value: Digit['value'];
+      text: string;
+      status: DigitReaderStatus.Result;
+    }
+  | {
+      value?: never;
+      text?: never;
+      status: DigitReaderStatus.Empty;
+    }
+  | {
+      value?: never;
+      text: string;
+      status: DigitReaderStatus.BadValue;
+    };
+
+class DigitReadingManager extends InterruptibleScenario<[options?: DigitReaderOptions], DigitReaderResult> {
+  public readonly readTone: ToneReadingManager;
+  public readonly recognizeSpeech: AsrManager;
+  private timeout?: NodeJS.Timeout;
+
+  public constructor(readTone: ToneReadingManager, recognizeSpeech: AsrManager, onBeforeStart: () => void) {
+    super('DigitReading', { onBeforeStart, children: [readTone, recognizeSpeech] });
+
+    this.readTone = readTone;
+    this.recognizeSpeech = recognizeSpeech;
+
+    this.addConflicting(readTone);
+    this.addConflicting(recognizeSpeech);
+  }
+
+  protected async onStart(
+    setResult: (result: DigitReaderResult) => void,
+    options: DigitReaderOptions = {},
+  ): Promise<void> {
+    setResult({ status: DigitReaderStatus.Empty });
+
+    if (options.timeout) {
+      log(`Для сценария "${this.name}" установлено ограничение по времени: ${options.timeout}ms`);
+
+      this.timeout = setTimeout(() => {
+        log(`Сценарий "${this.name}" завершается из-за ограничения по времени...`);
+        this.stop();
+      }, options.timeout);
+    }
+
+    const setResultFromText = (text: string): void => {
+      const digit = Digit.getByVariant(text);
+
+      if (digit) {
+        setResult({ status: DigitReaderStatus.Result, text, value: digit.value });
+      } else {
+        setResult({ status: DigitReaderStatus.BadValue, text });
+      }
+
+      this.stop(new RelatedScenarioHasResultException());
+    };
+
+    await Promise.all([
+      this.readTone.start({ timeout: options.timeout, length: 1 }).then((result) => {
+        if (result.status === ToneReaderStatus.Result) {
+          setResultFromText(result.tone);
+        }
+      }),
+      this.recognizeSpeech.start({ timeout: options.timeout, phraseHints: Digit.getAllVariants() }).then((result) => {
+        if (result.status === AsrStatus.Result) {
+          setResultFromText(result.text);
+        }
+      }),
+    ]);
+  }
+
+  protected onStop(stopObject: unknown): void {
+    if (this.timeout) clearTimeout(this.timeout);
+    this.readTone.stop(stopObject);
+    this.recognizeSpeech.stop(stopObject);
+  }
+}
+
+// endregion DigitReadingManager
+
 class SilenceManager extends InterruptibleScenario<[ms: number], void> {
   private readonly silentSleeper = new Sleeper();
 
@@ -772,7 +968,7 @@ class SilenceManager extends InterruptibleScenario<[ms: number], void> {
 
 // region CallControl
 
-class CallDisconnectedException extends ScenarioStoppedException<_DisconnectedEvent> {}
+class CallDisconnectedException extends ScenarioException<_DisconnectedEvent> {}
 
 class CallControl {
   private readonly call: Call;
@@ -784,6 +980,7 @@ class CallControl {
   public readonly silent: SilenceManager;
   public readonly readTone: ToneReadingManager;
   public readonly recognizeSpeech: AsrManager;
+  public readonly digitReading: DigitReadingManager;
 
   private constructor(call: Call) {
     this.call = call;
@@ -794,6 +991,7 @@ class CallControl {
     this.silent = new SilenceManager(boundThrowIfEnded);
     this.readTone = new ToneReadingManager(this.call, boundThrowIfEnded);
     this.recognizeSpeech = new AsrManager(this.call, boundThrowIfEnded);
+    this.digitReading = new DigitReadingManager(this.readTone, this.recognizeSpeech, boundThrowIfEnded);
 
     this.startCompletionHandling();
 
@@ -868,6 +1066,7 @@ class CallControl {
     this.silent.stop(endObject);
     this.recognizeSpeech.stop(endObject);
     this.readTone.stop(endObject);
+    this.digitReading.stop(endObject);
 
     this.endObject = endObject;
 
@@ -904,33 +1103,10 @@ class CallControl {
 
 // region main
 
-class Rating {
-  private static readonly list = [
-    new Rating(1, ['1', 'один']),
-    new Rating(2, ['2', 'два']),
-    new Rating(3, ['3', 'три']),
-    new Rating(4, ['4', 'четыре']),
-    new Rating(5, ['5', 'пять']),
-  ];
-
-  private constructor(
-    public readonly value: number,
-    public readonly variants: string[],
-  ) {}
-
-  public static getByVariant(variant: string): Rating | null {
-    return Rating.list.find(({ variants }) => variants.includes(variant)) ?? null;
-  }
-
-  public static getAllVariants(): string[] {
-    return flatten(Rating.list.map(({ variants }) => variants));
-  }
-}
-
 interface CallResult {
   name: string;
-  client_answer: string; // Последний ответ
-  rating: Rating['value'] | null;
+  client_answer: string | null;
+  rating: number | null;
   status: boolean;
 }
 
@@ -944,48 +1120,50 @@ async function main(): Promise<void> {
   callControl.setCallTimeout(60000);
 
   const result = await runScenario<CallResult>('Call', async (setResult) => {
-    setResult({ name, status: false, rating: null, client_answer: '' });
+    const state: {
+      lastRecognizedText: CallResult['client_answer'];
+      lastRating: CallResult['rating'];
+    } = {
+      lastRecognizedText: null,
+      lastRating: null,
+    };
+    const setResultFromStorage = () => {
+      setResult({
+        name,
+        status: state.lastRating != null,
+        rating: state.lastRating,
+        client_answer: state.lastRecognizedText,
+      });
+    };
 
     await callControl.silent.start(500);
 
     for (let i = 0; i <= 1; i++) {
-      await callControl.say.start('Добрый день! Оцените, пожалуйста, работу сервиса по пятибалльной шкале.');
+      // await callControl.say.start('Добрый день! Оцените, пожалуйста, работу сервиса по пятибалльной шкале.');
+      await callControl.say.start('ну');
 
-      // {
-      //   const userRating = await callControl.recognizeSpeech.start({
-      //     timeout: 6000,
-      //     phraseHints: Rating.getAllVariants(),
-      //   });
-      //
-      //   if (userRating.status === AsrStatus.Result) {
-      //     const rating = Rating.getByVariant(userRating.text);
-      //     if (rating) {
-      //       setResult({ name, status: true, rating: rating.value, client_answer: userRating.text });
-      //
-      //       await callControl.say.start('Спасибо за оценку! Всего доброго!');
-      //
-      //       return callControl.hangup();
-      //     }
-      //   }
-      // }
+      const userRating = await callControl.digitReading.start({ timeout: 6000 });
 
-      {
-        const userRating = await callControl.readTone.start({ timeout: 6000 });
+      if (userRating.status === DigitReaderStatus.Result) {
+        state.lastRecognizedText = userRating.text;
 
-        if (userRating.status === ToneReaderStatus.Result) {
-          const rating = Rating.getByVariant(userRating.tone);
-          if (rating) {
-            setResult({ name, status: true, rating: rating.value, client_answer: '' });
+        if (1 <= userRating.value && userRating.value <= 5) {
+          state.lastRating = userRating.value;
+          setResultFromStorage();
 
-            await callControl.say.start('Спасибо за оценку! Всего доброго!');
+          // await callControl.say.start('Спасибо за оценку! Всего доброго!');
+          await callControl.say.start('да');
 
-            return callControl.hangup();
-          }
+          return callControl.hangup();
         }
+      } else if (userRating.status === DigitReaderStatus.BadValue) {
+        state.lastRecognizedText = userRating.text;
+        setResultFromStorage();
       }
     }
 
-    await callControl.say.start('Не смог распознать ваш ответ! Всего доброго!');
+    await callControl.say.start('нет');
+    // await callControl.say.start('Не смог распознать ваш ответ! Всего доброго!');
 
     return callControl.hangup();
   });
