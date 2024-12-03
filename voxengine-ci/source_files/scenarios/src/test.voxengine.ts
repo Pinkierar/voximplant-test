@@ -30,9 +30,18 @@ interface _ASREvents {
   'ASR.Stopped': _ASRStoppedEvent;
 }
 
+/**
+ * @fix Type is used but does not exist
+ */
+interface HttpRequestResult {
+  code: number;
+  error?: string;
+}
+
 /// endregion TS FIXES
 
 require(Modules.ASR);
+require(Modules.ApplicationStorage);
 
 /// region PREPARATION
 
@@ -309,19 +318,12 @@ class EventAwaiter<EventsMap extends Record<string, any>, EventName extends keyo
 
 // endregion PromiseControl
 
-// region services
-
-interface HttpRequestResult {
-  code: number;
-  error?: string;
-}
-
 class CallListService {
   private static enabled: boolean = false;
 
   public static init(): void {
     try {
-      const data = VoxEngineService.getCustomDataAsObject();
+      const data = CustomData.get();
       if (!('url_callback' in data)) return;
 
       CallListService.enabled = true;
@@ -355,44 +357,6 @@ class CallListService {
   }
 }
 
-class VoxEngineService {
-  private static customDataAsObject?: object;
-
-  public static getCustomDataAsObject(): object {
-    if (!VoxEngineService.customDataAsObject) {
-      VoxEngineService.customDataAsObject = VoxEngineService.readCustomDataAsObject();
-    }
-
-    return VoxEngineService.customDataAsObject;
-  }
-
-  private static readCustomDataAsObject(): object {
-    const customData = VoxEngine.customData();
-
-    if (!customData) {
-      throw new ErrorInfo('VoxEngineService.readCustomDataAsObject', 'customData не указан', { customData });
-    }
-
-    let data;
-    try {
-      data = JSON.parse(customData);
-    } catch (e) {
-      throw new ErrorInfo(
-        'VoxEngineService.readCustomDataAsObject',
-        'Не удалось прочитать customData, как объект',
-        { customData },
-        ErrorInfo.from(e).stack,
-      );
-    }
-
-    log('Прочитан customData:', data);
-
-    return data;
-  }
-}
-
-// endregion services
-
 // region Scenario
 
 class ScenarioException<StopObject> extends Error {
@@ -421,17 +385,21 @@ class RelatedScenarioHasResultException extends ScenarioException<string> {
 
 async function runScenario<Result>(
   name: string,
-  scenario: (setResult: (value: Result) => void) => Promise<void>,
+  scenario: (setResult: (value: Result) => void, getResult: () => Result | undefined) => Promise<void>,
 ): Promise<Result> {
   let result: { value: Result } | undefined;
 
-  const setResult = (newResult: Result) => {
+  const setResult = (newResult: Result): void => {
     result = { value: newResult };
+  };
+
+  const getResult = (): Result | undefined => {
+    return result?.value;
   };
 
   try {
     log(`Сценарий "${name}" запущен`);
-    await scenario(setResult);
+    await scenario(setResult, getResult);
   } catch (e) {
     if (e instanceof ScenarioException) {
       if (!result) {
@@ -537,6 +505,8 @@ abstract class InterruptibleScenario<Args extends any[], Result> {
 
 // endregion Scenario
 
+// region call managers
+
 class SpeechManager extends InterruptibleScenario<[text: string], void> {
   private readonly call: Call;
   private readonly playbackFinishedAwaiter: EventAwaiter<_CallEvents, CallEvents.PlaybackFinished>;
@@ -563,9 +533,8 @@ class SpeechManager extends InterruptibleScenario<[text: string], void> {
   }
 
   protected onStop(stopObject: unknown): void {
-    this.playbackFinishedAwaiter.reject(stopObject);
-
     this.call.stopPlayback();
+    this.playbackFinishedAwaiter.reject(stopObject);
   }
 }
 
@@ -626,6 +595,8 @@ class ToneReadingManager extends InterruptibleScenario<[options: ToneReaderOptio
     }
 
     const { tone } = await this.toneReceivedAwaiter.wait();
+    if (tone) SessionStorage.getInstance().set('lastRecognizedText', tone);
+
     clearTimeout(this.toneReaderTimeout);
 
     log(`Получен текст с цифровой клавиатуры: "${tone}"`);
@@ -675,8 +646,6 @@ type AsrResult =
     };
 
 class AsrControl {
-  public static readonly MinimumConfidence = 15;
-
   private endObject?: unknown;
   private mediaFromCallEnabled = false;
 
@@ -751,7 +720,10 @@ class AsrControl {
   public async recognizeSpeech(): Promise<_ASRResultEvent> {
     if (this.endObject) throw this.endObject;
 
-    return await this.resultAwaiter.wait();
+    const event = await this.resultAwaiter.wait();
+    if (event.text) SessionStorage.getInstance().set('lastRecognizedText', event.text);
+
+    return event;
   }
 
   private startMediaFromCall(): void {
@@ -784,6 +756,8 @@ class AsrControl {
 }
 
 class AsrManager extends InterruptibleScenario<[options: AsrOptions], AsrResult> {
+  private static readonly MinimumConfidence = 10;
+
   private readonly call: Call;
   private asrControl?: AsrControl;
 
@@ -806,7 +780,7 @@ class AsrManager extends InterruptibleScenario<[options: AsrOptions], AsrResult>
 
     const { confidence, text } = await asrControl.recognizeSpeech();
 
-    if (confidence > AsrControl.MinimumConfidence) {
+    if (confidence > AsrManager.MinimumConfidence) {
       log(`Результат распознавания: "${text}". Точность: ${confidence}`);
       setResult({ status: AsrStatus.Result, text });
     } else {
@@ -966,6 +940,8 @@ class SilenceManager extends InterruptibleScenario<[ms: number], void> {
   }
 }
 
+// endregion call managers
+
 // region CallControl
 
 class CallDisconnectedException extends ScenarioException<_DisconnectedEvent> {}
@@ -1097,91 +1073,286 @@ class CallControl {
 
 // endregion CallControl
 
+class CustomData {
+  private static obj?: object;
+
+  public static get(): object {
+    if (!CustomData.obj) {
+      const customData = VoxEngine.customData();
+      if (!customData) throw new ErrorInfo('CustomData.from', 'customData не указан', { customData });
+
+      CustomData.obj = CustomData.from(customData);
+    }
+
+    return CustomData.obj;
+  }
+
+  private static from(customData: string): object {
+    try {
+      const data = JSON.parse(customData);
+
+      log('Прочитан customData:', data);
+
+      return data;
+    } catch (e) {
+      throw new ErrorInfo(
+        'CustomData.from',
+        'Не удалось прочитать customData, как объект',
+        { customData },
+        ErrorInfo.from(e).stack,
+      );
+    }
+  }
+}
+
+// region CalledUserData
+
+class CalledUserData {
+  private static instance?: CalledUserData;
+
+  private constructor(
+    public readonly name: string,
+    public readonly phone: string,
+  ) {
+    CalledUserData.instance = this;
+  }
+
+  public static getInstance(): CalledUserData {
+    if (!CalledUserData.instance) {
+      const data = CustomData.get();
+      CalledUserData.instance = this.from(data);
+      // CalledUserData.instance = this.from({ name: 'Гриша Романов', phone: '+79585477508' });
+    }
+
+    return CalledUserData.instance;
+  }
+
+  private static from(data: object): CalledUserData {
+    if (!('phone' in data) || !data.phone || typeof data.phone !== 'string') {
+      throw new ErrorInfo('CalledUser.from', 'Номер телефона вызываемого абонента не удалось прочитать', { data });
+    }
+    const phone = data.phone;
+
+    if (!('name' in data) || !data.name || typeof data.name !== 'string') {
+      throw new ErrorInfo('CalledUser.from', 'Имя вызываемого абонента не удалось прочитать', { data });
+    }
+    const name = data.name;
+
+    const calledUserData = new CalledUserData(name, phone);
+
+    log('Создан вызываемый абонент:', calledUserData);
+
+    return calledUserData;
+  }
+}
+
+// endregion CalledUserData
+
+// region SessionStorage
+
+class State<Value extends object> {
+  protected value: Value;
+
+  public constructor(initialValue: Value) {
+    this.value = { ...initialValue };
+  }
+
+  public patch(obj: Partial<Value>): void {
+    this.value = { ...this.value, ...obj };
+  }
+
+  public get<Key extends keyof Value>(key: Key): Value[Key] {
+    return this.value[key];
+  }
+
+  public set<Key extends keyof Value>(key: Key, value: Value[Key]): void {
+    this.value[key] = value;
+  }
+}
+
+class SessionStorage extends State<{
+  lastRecognizedText?: string;
+  lastRating?: number;
+  status: boolean;
+}> {
+  private static instance?: SessionStorage;
+
+  private constructor() {
+    super({ status: false });
+  }
+
+  public static getInstance(): SessionStorage {
+    if (!SessionStorage.instance) {
+      SessionStorage.instance = new SessionStorage();
+    }
+
+    return SessionStorage.instance;
+  }
+}
+
+// endregion SessionStorage
+
+class CallStorageObject {
+  public constructor(
+    public readonly phone: string,
+    public readonly name: string,
+    public readonly client_answer: string | null,
+    public readonly rating: number | null,
+    public readonly status: boolean,
+  ) {}
+
+  public static async create(): Promise<CallStorageObject> {
+    return await CallStorageObject.fromCallResult({ status: false, rating: null });
+  }
+
+  public static async fromCallResult(callResult: CallResult): Promise<CallStorageObject> {
+    const { name, phone } = CalledUserData.getInstance();
+    const lastRecognizedText = SessionStorage.getInstance().get('lastRecognizedText');
+
+    let client_answer = lastRecognizedText ?? null;
+    if (client_answer == null) {
+      const callStorageObject = await CallStorageObject.fromKVS(phone);
+      if (callStorageObject) {
+        client_answer = callStorageObject.client_answer;
+      }
+    }
+
+    return new CallStorageObject(phone, name, client_answer, callResult.rating, callResult.status);
+  }
+
+  public async saveToKVS(): Promise<void> {
+    await ApplicationStorage.put(this.phone, JSON.stringify(this.toStorageKey()), 7000000);
+  }
+
+  private toStorageKey() {
+    const { name, client_answer, rating, status } = this;
+    return { name, client_answer, rating, status };
+  }
+
+  private static async fromKVS(phone: string): Promise<CallStorageObject | null> {
+    try {
+      const prevStorageKey = await ApplicationStorage.get(phone);
+      if (!prevStorageKey) return null;
+
+      const callStorageObject: unknown = JSON.parse(prevStorageKey.value);
+
+      if (typeof callStorageObject !== 'object' || !callStorageObject) return null;
+
+      if (!('name' in callStorageObject)) return null;
+      const { name } = callStorageObject;
+      if (typeof name !== 'string') return null;
+
+      if (!('client_answer' in callStorageObject)) return null;
+      const { client_answer } = callStorageObject;
+      if (client_answer !== null && typeof client_answer !== 'string') return null;
+
+      if (!('rating' in callStorageObject)) return null;
+      const { rating } = callStorageObject;
+      if (rating !== null && typeof rating !== 'number') return null;
+
+      if (!('status' in callStorageObject)) return null;
+      const { status } = callStorageObject;
+      if (typeof status !== 'boolean') return null;
+
+      // @ts-ignore all arguments are checked
+      return new CallStorageObject(phone, name, client_answer, rating, status);
+    } catch (e) {
+      const error = ErrorInfo.from(e);
+      log('Ошибка при получении данных из KVS:', error);
+      return null;
+    }
+  }
+}
+
 /// endregion PREPARATION
 
 /// region MAIN
 
-// region main
-
 interface CallResult {
-  name: string;
-  client_answer: string | null;
   rating: number | null;
   status: boolean;
 }
 
 async function main(): Promise<void> {
   CallListService.init();
-  const data = VoxEngineService.getCustomDataAsObject();
-  const { name, phone } = createCalledUserData(data);
-  // const { name, phone } = createCalledUserData({ name: 'Гриша Романов', phone: '+79585477508' });
+
+  const calledUserData = CalledUserData.getInstance();
+  const { phone } = calledUserData;
 
   const callControl = await CallControl.callPSTN(phone);
   callControl.setCallTimeout(60000);
 
-  const result = await runScenario<CallResult>('Call', async (setResult) => {
-    const state: {
-      lastRecognizedText: CallResult['client_answer'];
-      lastRating: CallResult['rating'];
-    } = {
-      lastRecognizedText: null,
-      lastRating: null,
-    };
-    const setResultFromStorage = () => {
-      setResult({
-        name,
-        status: state.lastRating != null,
-        rating: state.lastRating,
-        client_answer: state.lastRecognizedText,
-      });
+  const callResult = await runScenario<CallResult>('Call', async (setResult, getResult) => {
+    const hangup = (): void => {
+      callControl.silent.start(300);
+
+      setResult({ rating: getResult()?.rating ?? null, status: true });
+
+      callControl.hangup();
     };
 
     await callControl.silent.start(500);
 
     for (let i = 0; i <= 1; i++) {
-      // await callControl.say.start('Добрый день! Оцените, пожалуйста, работу сервиса по пятибалльной шкале.');
-      await callControl.say.start('ну');
+      await callControl.say.start('Добрый день! Оцените, пожалуйста, работу сервиса по пятибалльной шкале.');
 
       const userRating = await callControl.digitReading.start({ timeout: 6000 });
 
       if (userRating.status === DigitReaderStatus.Result) {
-        state.lastRecognizedText = userRating.text;
-
         if (1 <= userRating.value && userRating.value <= 5) {
-          state.lastRating = userRating.value;
-          setResultFromStorage();
+          setResult({ status: false, rating: userRating.value });
 
-          // await callControl.say.start('Спасибо за оценку! Всего доброго!');
-          await callControl.say.start('да');
+          await callControl.say.start('Спасибо за оценку! Всего доброго!');
 
-          return callControl.hangup();
+          return hangup();
         }
-      } else if (userRating.status === DigitReaderStatus.BadValue) {
-        state.lastRecognizedText = userRating.text;
-        setResultFromStorage();
       }
     }
 
-    await callControl.say.start('нет');
-    // await callControl.say.start('Не смог распознать ваш ответ! Всего доброго!');
+    await callControl.say.start('Не смог распознать ваш ответ! Всего доброго!');
 
-    return callControl.hangup();
+    return hangup();
+
+    // await callControl.say.start('ну');
+    // const result = await callControl.readTone.start({ timeout: 6000 });
+    // if (result.status === ToneReaderStatus.Result) {
+    //   const rating = Number(result.tone);
+    //   if (1 <= rating && rating <= 5) {
+    //     setResult({ status: false, rating });
+    //
+    //     await callControl.say.start('да');
+    //
+    //     return hangup();
+    //   }
+    // }
+    //
+    // await callControl.say.start('пок');
+    //
+    // return hangup();
   });
 
-  return await saveResult(result);
-}
+  log('Результат звонка:', callResult);
 
-async function saveResult(result: CallResult): Promise<void> {
-  log('Результат звонка:', result);
-
-  try {
-    await CallListService.reportResult(result);
-  } catch (e) {
-    const error = ErrorInfo.from(e);
-    log('Ошибка при отправки результата в CallList', error);
-  }
+  await saveResult(callResult);
 
   VoxEngine.terminate();
+}
+
+async function saveResult(callResult: CallResult): Promise<void> {
+  try {
+    await CallListService.reportResult(callResult);
+  } catch (e) {
+    const error = ErrorInfo.from(e);
+    log('Ошибка при отправки результата в CallList:', error);
+  }
+
+  try {
+    const callStorageObject = await CallStorageObject.fromCallResult(callResult);
+    await callStorageObject.saveToKVS();
+  } catch (e) {
+    const error = ErrorInfo.from(e);
+    log('Ошибка при сохранении данных в KVS:', error);
+  }
 }
 
 async function errorHandler(e: unknown): Promise<void> {
@@ -1193,40 +1364,19 @@ async function errorHandler(e: unknown): Promise<void> {
     await CallListService.reportError(error);
   } catch (e) {
     const error = ErrorInfo.from(e);
-    log('Ошибка при отправки ошибки в CallList', error);
+    log('Ошибка при отправки ошибки в CallList:', error);
+  }
+
+  try {
+    const callStorageObject = await CallStorageObject.create();
+    await callStorageObject.saveToKVS();
+  } catch (e) {
+    const error = ErrorInfo.from(e);
+    log('Ошибка при сохранении данных в KVS:', error);
   }
 
   throw new Error(`${error.sender}: ${error.message}`);
 }
-
-// endregion main
-
-// region CalledUserData
-
-interface CalledUserData {
-  readonly name: string;
-  readonly phone: string;
-}
-
-function createCalledUserData(data: object): CalledUserData {
-  if (!('phone' in data) || !data.phone || typeof data.phone !== 'string') {
-    throw new ErrorInfo('CalledUser.from', 'Номер телефона вызываемого абонента не удалось прочитать', { data });
-  }
-  const phone = data.phone;
-
-  if (!('name' in data) || !data.name || typeof data.name !== 'string') {
-    throw new ErrorInfo('CalledUser.from', 'Имя вызываемого абонента не удалось прочитать', { data });
-  }
-  const name = data.name;
-
-  const calledUserData: CalledUserData = { name, phone };
-
-  log('Создан вызываемый абонент:', calledUserData);
-
-  return calledUserData;
-}
-
-// endregion CalledUserData
 
 // region Started
 
