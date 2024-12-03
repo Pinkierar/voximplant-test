@@ -1220,16 +1220,7 @@ class CallStorageObject {
     return new CallStorageObject(phone, name, client_answer, callResult.rating, callResult.status);
   }
 
-  public async saveToKVS(): Promise<void> {
-    await ApplicationStorage.put(this.phone, JSON.stringify(this.toStorageKey()), 7000000);
-  }
-
-  private toStorageKey() {
-    const { name, client_answer, rating, status } = this;
-    return { name, client_answer, rating, status };
-  }
-
-  private static async fromKVS(phone: string): Promise<CallStorageObject | null> {
+  public static async fromKVS(phone: string): Promise<CallStorageObject | null> {
     try {
       const prevStorageKey = await ApplicationStorage.get(phone);
       if (!prevStorageKey) return null;
@@ -1262,18 +1253,29 @@ class CallStorageObject {
       return null;
     }
   }
+
+  public async saveToKVS(): Promise<void> {
+    await ApplicationStorage.put(this.phone, JSON.stringify(this.toStorageKey()), 7000000);
+  }
+
+  private toStorageKey() {
+    const { name, client_answer, rating, status } = this;
+    return { name, client_answer, rating, status };
+  }
 }
 
 /// endregion PREPARATION
 
 /// region MAIN
 
+// region outgoingCall
+
 interface CallResult {
   rating: number | null;
   status: boolean;
 }
 
-async function main(): Promise<void> {
+async function outgoingCall(): Promise<void> {
   CallListService.init();
 
   const calledUserData = CalledUserData.getInstance();
@@ -1282,7 +1284,7 @@ async function main(): Promise<void> {
   const callControl = await CallControl.callPSTN(phone);
   callControl.setCallTimeout(60000);
 
-  const callResult = await runScenario<CallResult>('Call', async (setResult, getResult) => {
+  const callResult = await runScenario<CallResult>('OutgoingCall', async (setResult, getResult) => {
     const hangup = (): void => {
       callControl.silent.start(300);
 
@@ -1294,7 +1296,7 @@ async function main(): Promise<void> {
     await callControl.silent.start(500);
 
     for (let i = 0; i <= 1; i++) {
-      await callControl.say.start('Добрый день! Оцените, пожалуйста, работу сервиса по пятибалльной шкале.');
+      await callControl.say.start('Добрый день! Оцените, пожалуйста, работу сервиса по пятибальной шкале.');
 
       const userRating = await callControl.digitReading.start({ timeout: 6000 });
 
@@ -1312,23 +1314,6 @@ async function main(): Promise<void> {
     await callControl.say.start('Не смог распознать ваш ответ! Всего доброго!');
 
     return hangup();
-
-    // await callControl.say.start('ну');
-    // const result = await callControl.readTone.start({ timeout: 6000 });
-    // if (result.status === ToneReaderStatus.Result) {
-    //   const rating = Number(result.tone);
-    //   if (1 <= rating && rating <= 5) {
-    //     setResult({ status: false, rating });
-    //
-    //     await callControl.say.start('да');
-    //
-    //     return hangup();
-    //   }
-    // }
-    //
-    // await callControl.say.start('пок');
-    //
-    // return hangup();
   });
 
   log('Результат звонка:', callResult);
@@ -1375,21 +1360,58 @@ async function errorHandler(e: unknown): Promise<void> {
     log('Ошибка при сохранении данных в KVS:', error);
   }
 
-  throw new Error(`${error.sender}: ${error.message}`);
+  error.message = `${error.sender}: ${error.message}`;
+  throw error;
 }
 
-// region Started
-
 VoxEngine.addEventListener(AppEvents.Started, startedHandler);
-
 async function startedHandler(): Promise<void> {
   try {
-    await main();
+    await outgoingCall();
   } catch (e) {
     await errorHandler(e);
   }
 }
 
-// endregion Started
+// endregion outgoingCall
+
+// region incomingCall
+
+async function incomingCall(event: _CallAlertingEvent): Promise<void> {
+  const callStorageObject = await CallStorageObject.fromKVS(event.call.number());
+
+  const callControl = await CallControl.from(event.call);
+  // event.call.answer();
+
+  await runScenario<void>('IncomingCall', async (setResult) => {
+    setResult();
+
+    if (callStorageObject) {
+      await callControl.say.start(`Добрый день и всего доброго, ${callStorageObject.name}!`);
+    } else {
+      await callControl.say.start('Вы позвонили в ООО Компания');
+    }
+
+    await callControl.silent.start(300);
+
+    callControl.hangup();
+  });
+}
+
+VoxEngine.addEventListener(AppEvents.CallAlerting, callAlertingHandler);
+async function callAlertingHandler(event: _CallAlertingEvent): Promise<void> {
+  try {
+    await incomingCall(event);
+  } catch (e) {
+    const error = ErrorInfo.from(e);
+
+    log('callAlertingHandler catch:', error);
+
+    error.message = `${error.sender}: ${error.message}`;
+    throw error;
+  }
+}
+
+// endregion incomingCall
 
 /// endregion MAIN
